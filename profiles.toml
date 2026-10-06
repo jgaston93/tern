@@ -1,0 +1,71 @@
+# Built-in tern profiles. This file is compiled into the binary.
+#
+# To add or override profiles, put [[profile]] entries in any of:
+#   $TERN_CONFIG, ./tern.toml, ~/.config/tern/profiles.toml
+# User profiles are checked before these, so a user profile with the same
+# name or `match` wins.
+#
+# Selection: --profile NAME (or TERN_PROFILE), otherwise the first profile
+# whose `match` substrings appear in the model name, otherwise "default".
+#
+# Sampling values below are starting points taken from model cards at the
+# time of writing. Check the card for the exact model you run.
+#
+# Fields (all optional):
+#   match           substrings of the model name that select this profile
+#   ctx             context budget in tokens (set to what the server is configured for)
+#   max_tokens      max output tokens per response
+#   temperature, top_p, top_k, min_p, repeat_penalty   sampling; unset = server default
+#   edit_format     "exact" | "fuzzy" | "whole"
+#   tools           subset of: read edit write grep glob bash (empty = all)
+#   prompt          "terse" (short tool descriptions) | "guided" (adds examples)
+#   prompt_extra    text appended to the system prompt
+#   lenient_parsing recover tool calls written as text, repair sloppy JSON
+#   keep_reasoning  keep reasoning text within the current request
+#   check           command run after edits, e.g. "cargo check --message-format short"
+
+[[profile]]
+name = "default"
+temperature = 0.2
+
+# Hosted frontier models: exact edits work well, and several reject a custom
+# temperature, so sampling is left to the provider.
+[[profile]]
+name = "frontier"
+match = ["claude", "gpt-5", "gemini"]
+ctx = 128000
+edit_format = "exact"
+lenient_parsing = false
+
+[[profile]]
+name = "qwen3-coder"
+match = ["qwen3-coder"]
+ctx = 65536
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+repeat_penalty = 1.05
+edit_format = "fuzzy"
+
+# gpt-oss expects its reasoning to be passed back across tool calls within
+# a request, so it's kept until the next user message.
+[[profile]]
+name = "gpt-oss"
+match = ["gpt-oss"]
+ctx = 65536
+temperature = 1.0
+top_p = 1.0
+keep_reasoning = true
+edit_format = "fuzzy"
+
+# For 7B-14B models. Select explicitly with --profile small.
+# Fewer tools, examples in descriptions, whole-file writes instead of
+# find-and-replace, and a tighter context so the model stays focused.
+[[profile]]
+name = "small"
+ctx = 16384
+temperature = 0.2
+edit_format = "whole"
+tools = ["read", "write", "grep", "bash"]
+prompt = "guided"
+prompt_extra = "Work in small steps. Read a file before writing it. Make one change at a time."

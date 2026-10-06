@@ -1,0 +1,143 @@
+//! Minimal OpenAI-compatible chat client. Works with llama.cpp server,
+//! Ollama, vLLM, LM Studio, OpenRouter, OpenAI, etc.
+
+use crate::profile::Profile;
+use serde_json::{json, Map, Value};
+use std::time::Duration;
+
+pub struct Config {
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub max_steps: usize,
+    /// Skip confirmation prompts for shell commands.
+    pub yolo: bool,
+    pub profile: Profile,
+}
+
+impl Config {
+    /// Env vars override the profile, so a one-off `TERN_CTX=8000` works
+    /// without editing config.
+    pub fn new(profile_name: Option<String>) -> Result<Self, String> {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let model = env("TERN_MODEL").unwrap_or_else(|| "local".into());
+        let wanted = profile_name.or_else(|| env("TERN_PROFILE"));
+        let mut profile = crate::profile::select(&model, wanted.as_deref())?;
+        if let Some(c) = env("TERN_CTX").and_then(|v| v.parse().ok()) {
+            profile.ctx = c;
+        }
+        if let Some(m) = env("TERN_MAX_TOKENS").and_then(|v| v.parse().ok()) {
+            profile.max_tokens = m;
+        }
+        if let Some(c) = env("TERN_CHECK") {
+            profile.check = Some(c);
+        }
+        Ok(Config {
+            base_url: env("TERN_BASE_URL").unwrap_or_else(|| "http://localhost:8080/v1".into()),
+            model,
+            api_key: env("TERN_API_KEY"),
+            max_steps: env("TERN_MAX_STEPS").and_then(|v| v.parse().ok()).unwrap_or(40),
+            yolo: env("TERN_YOLO").is_some(),
+            profile,
+        })
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct Usage {
+    pub prompt: u64,
+    pub completion: u64,
+    pub cached: u64,
+}
+
+pub struct Response {
+    pub message: Value,
+    pub usage: Usage,
+}
+
+pub fn chat(cfg: &Config, messages: &[Value], tools: Option<&Value>) -> Result<Response, String> {
+    let p = &cfg.profile;
+    let mut body = json!({
+        "model": cfg.model,
+        "messages": messages,
+        "max_tokens": p.max_tokens,
+    });
+    if let Some(t) = tools.filter(|t| t.as_array().is_some_and(|a| !a.is_empty())) {
+        body["tools"] = t.clone();
+    }
+    // Only send what the profile sets: hosted APIs reject unknown or
+    // unsupported sampling fields, local servers fall back to their defaults.
+    let mut set = |k: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            body[k] = v;
+        }
+    };
+    set("temperature", p.temperature.map(Value::from));
+    set("top_p", p.top_p.map(Value::from));
+    set("top_k", p.top_k.map(Value::from));
+    set("min_p", p.min_p.map(Value::from));
+    // llama.cpp calls it repeat_penalty, vLLM repetition_penalty.
+    set("repeat_penalty", p.repeat_penalty.map(Value::from));
+    set("repetition_penalty", p.repeat_penalty.map(Value::from));
+
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let mut req = ureq::post(&url).timeout(Duration::from_secs(600));
+    if let Some(k) = &cfg.api_key {
+        req = req.set("Authorization", &format!("Bearer {k}"));
+    }
+
+    let v: Value = req
+        .send_json(body)
+        .map_err(|e| match e {
+            ureq::Error::Status(code, r) => format!("HTTP {code}: {}", r.into_string().unwrap_or_default()),
+            e => e.to_string(),
+        })?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+
+    let message = &v["choices"][0]["message"];
+    if message.is_null() {
+        return Err(format!("unexpected response: {v}"));
+    }
+    let u = &v["usage"];
+    Ok(Response {
+        message: clean(message, p.keep_reasoning),
+        usage: Usage {
+            prompt: u["prompt_tokens"].as_u64().unwrap_or(0),
+            completion: u["completion_tokens"].as_u64().unwrap_or(0),
+            cached: u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
+        },
+    })
+}
+
+/// Keep only what must be sent back next request. Reasoning text can be
+/// thousands of tokens; by default it never enters history. With
+/// `keep_reasoning` it's kept until the request finishes (see Context::push).
+fn clean(msg: &Value, keep_reasoning: bool) -> Value {
+    let mut out = Map::new();
+    out.insert("role".into(), json!("assistant"));
+    out.insert("content".into(), json!(msg["content"].as_str().unwrap_or("")));
+    if keep_reasoning {
+        if let Some(r) = msg["reasoning_content"].as_str().or(msg["reasoning"].as_str()).filter(|r| !r.is_empty()) {
+            out.insert("reasoning_content".into(), json!(r));
+        }
+    }
+    if let Some(calls) = msg["tool_calls"].as_array().filter(|c| !c.is_empty()) {
+        // Normalize: some local servers return arguments as an object, not a string.
+        let calls: Vec<Value> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let args = &c["function"]["arguments"];
+                let args = args.as_str().map(str::to_string).unwrap_or_else(|| args.to_string());
+                json!({
+                    "id": c["id"].as_str().filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| format!("call_{i}")),
+                    "type": "function",
+                    "function": { "name": c["function"]["name"], "arguments": args }
+                })
+            })
+            .collect();
+        out.insert("tool_calls".into(), json!(calls));
+    }
+    Value::Object(out)
+}
