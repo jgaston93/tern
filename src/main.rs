@@ -36,6 +36,12 @@ Find code with {find} before reading; read only the ranges you need. {change} \
 Don't repeat file contents back in replies. \
 Be terse. When finished, reply with a one or two sentence summary."
     );
+    if !p.subagents.is_empty() {
+        s.push_str(
+            " Delegate self-contained subtasks with the task tool; you pay only for the \
+result it returns, not the subagent's steps. Give complete, standalone instructions.",
+        );
+    }
     if !p.prompt_extra.is_empty() {
         s.push('\n');
         s.push_str(&p.prompt_extra);
@@ -102,7 +108,7 @@ fn main() {
 
     if let Some(task) = &args.prompt {
         ctx.push(json!({"role": "user", "content": task}));
-        let (outcome, steps) = run_turn(&cfg, &mut ctx, &mut tools, &schemas);
+        let (outcome, steps, _) = run_turn(&cfg, &mut ctx, &mut tools, &schemas, 0);
         if let Some(path) = &args.stats_file {
             let (requests, t) = ctx.totals();
             let line = json!({
@@ -135,14 +141,40 @@ fn main() {
             "/stats" => ctx.print_stats(),
             input => {
                 ctx.push(json!({"role": "user", "content": input}));
-                run_turn(&cfg, &mut ctx, &mut tools, &schemas);
+                run_turn(&cfg, &mut ctx, &mut tools, &schemas, 0);
             }
         }
     }
 }
 
-fn run_turn(cfg: &llm::Config, ctx: &mut Context, tools: &mut tools::Tools, schemas: &Value) -> (Outcome, usize) {
+/// How deeply subagents may nest. Child profiles default to no `subagents`,
+/// so this is a backstop against a misconfigured recursive delegation.
+const MAX_SUBAGENT_DEPTH: usize = 2;
+
+/// Runs the agent loop to completion. `depth` is 0 for the top-level agent and
+/// increments for each nested subagent; it controls log indentation and
+/// whether assistant text prints to stdout (only the top level does). Returns
+/// the outcome, step count, and the final assistant text (the summary a parent
+/// receives when this run was a subagent).
+fn run_turn(
+    cfg: &llm::Config,
+    ctx: &mut Context,
+    tools: &mut tools::Tools,
+    schemas: &Value,
+    depth: usize,
+) -> (Outcome, usize, String) {
     let lenient = cfg.profile.lenient_parsing;
+    let ind = "  ".repeat(depth);
+    // Tool names the lenient parser will recognise in text form.
+    let known: Vec<&str> = if cfg.profile.subagents.is_empty() {
+        tools::ALL_TOOLS.to_vec()
+    } else {
+        let mut v = tools::ALL_TOOLS.to_vec();
+        v.push("task");
+        v
+    };
+    let mut last_text = String::new();
+
     for step in 1..=cfg.max_steps {
         ctx.maintain(cfg, tools);
 
@@ -150,28 +182,41 @@ fn run_turn(cfg: &llm::Config, ctx: &mut Context, tools: &mut tools::Tools, sche
         let resp = match llm::chat(cfg, &ctx.messages(), Some(schemas)) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("error: {e}");
-                return (Outcome::Error, step);
+                eprintln!("{ind}error: {e}");
+                return (Outcome::Error, step, last_text);
             }
         };
         let u = resp.usage;
-        eprintln!("  [{} in, {} cached, {} out]", u.prompt, u.cached, u.completion);
+        eprintln!("{ind}  [{} in, {} cached, {} out]", u.prompt, u.cached, u.completion);
         ctx.record_usage(u, sent);
 
         let mut msg = resp.message;
         if lenient {
-            let n = parse::recover_text_calls(&mut msg, tools::ALL_TOOLS);
+            let n = parse::recover_text_calls(&mut msg, &known);
             if n > 0 {
-                eprintln!("  [recovered {n} tool call(s) written as text]");
+                eprintln!("{ind}  [recovered {n} tool call(s) written as text]");
             }
         }
         if let Some(text) = msg["content"].as_str().filter(|t| !t.trim().is_empty()) {
-            println!("{}", text.trim());
+            let text = text.trim().to_string();
+            if depth == 0 {
+                println!("{text}");
+            }
+            last_text = text;
         }
         let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
         ctx.push(msg);
         if calls.is_empty() {
-            return (Outcome::Done, step);
+            // Don't let the model declare victory while the check is failing.
+            if cfg.profile.require_check_pass {
+                if let Some((false, report)) = tools.run_check() {
+                    eprintln!("{ind}  [not done — check still failing, continuing]");
+                    ctx.push(json!({"role": "user", "content":
+                        format!("Not finished: the check is still failing. Keep working; do not stop until it passes.\n{report}")}));
+                    continue;
+                }
+            }
+            return (Outcome::Done, step, last_text);
         }
 
         let mut changed = false;
@@ -182,26 +227,74 @@ fn run_turn(cfg: &llm::Config, ctx: &mut Context, tools: &mut tools::Tools, sche
             let (label, out) = match parse::parse_args(raw, lenient) {
                 Ok(args) => {
                     let label = format!("{name} {}", tools::summarize_args(&args));
-                    eprintln!("  · {label}");
-                    (label, tools.run(name, &args))
+                    eprintln!("{ind}  · {label}");
+                    // task is handled here (not in Tools) because spawning a
+                    // subagent needs Config, which Tools deliberately doesn't hold.
+                    let out = if name == "task" {
+                        run_subagent(cfg, &args, depth)
+                    } else {
+                        tools.run(name, &args)
+                    };
+                    (label, out)
                 }
                 // Tell the model what went wrong instead of guessing; most
                 // models fix malformed JSON on the next try.
                 Err(e) => (name.to_string(), format!("error: arguments were not valid JSON ({e})")),
             };
-            changed |= matches!(name, "edit" | "write") && out.starts_with("ok");
+            // A subagent may have edited files on disk, so run the parent's
+            // check afterward too.
+            changed |= (matches!(name, "edit" | "write") && out.starts_with("ok")) || name == "task";
             ctx.push_tool_result(id, label, out);
         }
 
         // One check per step, after all of the step's edits, attached to the
         // last result so the model sees it before deciding what's next.
         if changed {
-            if let Some(report) = tools.run_check() {
-                eprintln!("  {}", report.lines().next().unwrap_or(""));
+            if let Some((_, report)) = tools.run_check() {
+                eprintln!("{ind}  {}", report.lines().next().unwrap_or(""));
                 ctx.append_to_last_tool_result(&report);
             }
         }
     }
-    println!("[stopped after {} steps]", cfg.max_steps);
-    (Outcome::StepLimit, cfg.max_steps)
+    if depth == 0 {
+        println!("[stopped after {} steps]", cfg.max_steps);
+    } else {
+        eprintln!("{ind}[subagent stopped after {} steps]", cfg.max_steps);
+    }
+    (Outcome::StepLimit, cfg.max_steps, last_text)
+}
+
+/// Run a delegated subtask in its own context and budget, returning only its
+/// final summary to the caller. The subagent's reads/edits/output never enter
+/// the parent's history — that isolation is the whole point.
+fn run_subagent(cfg: &llm::Config, a: &Value, depth: usize) -> String {
+    if depth + 1 > MAX_SUBAGENT_DEPTH {
+        return format!("error: subagent depth limit ({MAX_SUBAGENT_DEPTH}) reached");
+    }
+    let role = a["role"].as_str().unwrap_or("");
+    let description = a["description"].as_str().unwrap_or("");
+    if description.trim().is_empty() {
+        return "error: task needs a non-empty description".into();
+    }
+    if !cfg.profile.subagents.iter().any(|s| s == role) {
+        return format!("error: unknown role '{role}'; available: {}", cfg.profile.subagents.join(", "));
+    }
+    let child_profile = match profile::select(&cfg.model, Some(role)) {
+        Ok(p) => p,
+        Err(e) => return format!("error: {e}"),
+    };
+    let child_cfg = cfg.for_subagent(child_profile);
+    let p = &child_cfg.profile;
+    let mut child_ctx = Context::new(&system_prompt(p), p.ctx);
+    let mut child_tools = tools::Tools::new(child_cfg.yolo, p);
+    let child_schemas = tools::schemas(p);
+
+    eprintln!("{}╭─ subagent [{role}] {}", "  ".repeat(depth), tools::clip(description, 60));
+    child_ctx.push(json!({"role": "user", "content": description}));
+    let (outcome, steps, summary) = run_turn(&child_cfg, &mut child_ctx, &mut child_tools, &child_schemas, depth + 1);
+    let (_, t) = child_ctx.totals();
+    eprintln!("{}╰─ subagent [{role}] {outcome:?} in {steps} steps (~{} prompt tok)", "  ".repeat(depth), t.prompt);
+
+    let summary = if summary.trim().is_empty() { "(subagent returned no summary)" } else { summary.trim() };
+    format!("[subagent {role}: {outcome:?}, {steps} steps]\n{summary}")
 }

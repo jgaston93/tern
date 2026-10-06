@@ -9,9 +9,11 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use wait_timeout::ChildExt;
 use walkdir::WalkDir;
 
 const READ_DEFAULT: usize = 200; // lines per read unless the model asks
@@ -64,7 +66,23 @@ pub fn schemas(p: &Profile) -> Value {
           r#"{"command": "cargo test 2>&1 | tail -20"}"#,
           json!({"command": s}), &["command"]),
     ];
-    Value::Array(all.into_iter().filter(|t| p.tool_enabled(t["function"]["name"].as_str().unwrap())).collect())
+    let mut out: Vec<Value> =
+        all.into_iter().filter(|t| p.tool_enabled(t["function"]["name"].as_str().unwrap())).collect();
+    // `task` is offered only to agents configured with subagent roles, so an
+    // ordinary agent's tool set (and cacheable prefix) is unchanged.
+    if !p.subagents.is_empty() {
+        let roles: Vec<Value> = p.subagents.iter().map(|r| json!(r)).collect();
+        out.push(json!({"type": "function", "function": {
+            "name": "task",
+            "description": "Delegate a self-contained subtask to a subagent with a fresh context. \
+You get back only its final summary, not its intermediate work, so give complete standalone instructions.",
+            "parameters": {"type": "object", "properties": {
+                "description": {"type": "string", "description": "the complete, standalone subtask"},
+                "role": {"type": "string", "enum": roles, "description": "which subagent to use"}
+            }, "required": ["description", "role"]}
+        }}));
+    }
+    Value::Array(out)
 }
 
 pub struct Tools {
@@ -204,7 +222,7 @@ impl Tools {
         if !self.yolo && !confirm(&format!("run `{cmd}`?")) {
             return "error: user declined this command".into();
         }
-        match shell(cmd) {
+        match shell(cmd, self.profile.bash_timeout) {
             Ok((code, text)) => format!("exit {code}\n{}", truncate_middle(&text, BASH_HEAD, BASH_TAIL)),
             Err(e) => format!("error: {e}"),
         }
@@ -213,12 +231,12 @@ impl Tools {
     /// Runs the profile's check command (configured by the user, so no
     /// confirmation). A pass costs the model one short line; only failures
     /// carry output.
-    pub fn run_check(&self) -> Option<String> {
+    pub fn run_check(&self) -> Option<(bool, String)> {
         let cmd = self.profile.check.as_deref()?;
-        Some(match shell(cmd) {
-            Ok((0, _)) => format!("[check `{cmd}`: passed]"),
-            Ok((code, text)) => format!("[check `{cmd}`: exit {code}]\n{}", truncate_middle(&text, 30, 30)),
-            Err(e) => format!("[check `{cmd}` could not run: {e}]"),
+        Some(match shell(cmd, self.profile.bash_timeout) {
+            Ok((0, _)) => (true, format!("[check `{cmd}`: passed]")),
+            Ok((code, text)) => (false, format!("[check `{cmd}`: exit {code}]\n{}", truncate_middle(&text, 30, 30))),
+            Err(e) => (false, format!("[check `{cmd}` could not run: {e}]")),
         })
     }
 
@@ -294,20 +312,50 @@ fn glob_files(a: &Value) -> String {
 
 // ---------- helpers ----------
 
-fn shell(cmd: &str) -> Result<(i32, String), String> {
-    let out = if cfg!(windows) {
-        Command::new("cmd").args(["/C", cmd]).output()
-    } else {
-        Command::new("sh").args(["-c", cmd]).output()
+/// Run a shell command. `timeout` in seconds, 0 = no limit. On timeout the
+/// child is killed so a hung command can't wedge an (unattended) agent.
+fn shell(cmd: &str, timeout: u64) -> Result<(i32, String), String> {
+    let mut command = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
+    command.args(if cfg!(windows) { ["/C", cmd] } else { ["-c", cmd] });
+
+    if timeout == 0 {
+        let o = command.output().map_err(|e| e.to_string())?;
+        return Ok((o.status.code().unwrap_or(-1), combine(&o.stdout, &o.stderr)));
+    }
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // Drain both pipes on their own threads so large output can't fill the
+    // pipe buffer and deadlock us while we wait on the timeout.
+    let mut so = child.stdout.take().unwrap();
+    let mut se = child.stderr.take().unwrap();
+    let t_out = std::thread::spawn(move || { let mut b = Vec::new(); let _ = so.read_to_end(&mut b); b });
+    let t_err = std::thread::spawn(move || { let mut b = Vec::new(); let _ = se.read_to_end(&mut b); b });
+
+    let status = match child.wait_timeout(Duration::from_secs(timeout)).map_err(|e| e.to_string())? {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("command timed out after {timeout}s and was killed"));
+        }
     };
-    let o = out.map_err(|e| e.to_string())?;
-    let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-    let err = String::from_utf8_lossy(&o.stderr);
+    let out = t_out.join().unwrap_or_default();
+    let err = t_err.join().unwrap_or_default();
+    Ok((status.code().unwrap_or(-1), combine(&out, &err)))
+}
+
+fn combine(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(stdout).into_owned();
+    let err = String::from_utf8_lossy(stderr);
     if !err.trim().is_empty() {
         text.push_str("\n[stderr]\n");
         text.push_str(&err);
     }
-    Ok((o.status.code().unwrap_or(-1), strip_ansi(&text)))
+    strip_ansi(&text)
 }
 
 /// Line-based match that ignores leading/trailing whitespace on each line and
@@ -418,7 +466,7 @@ fn confirm(q: &str) -> bool {
 }
 
 pub fn summarize_args(a: &Value) -> String {
-    let s = ["pattern", "command", "path"]
+    let s = ["pattern", "command", "path", "description"]
         .iter()
         .find_map(|k| a[*k].as_str())
         .map(str::to_string)
@@ -500,6 +548,27 @@ mod tests {
         let p = tmp("fuzzy3", "  a\n  b\n\ta\n\tb\n");
         let r = Tools::new(true, &fuzzy()).run("edit", &json!({"path": p, "old": "a\nb", "new": "c"}));
         assert!(r.contains("matches 2 places ignoring indentation"), "{r}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_times_out_and_is_killed() {
+        let start = std::time::Instant::now();
+        let r = shell("sleep 10", 1);
+        assert!(r.is_err() && r.unwrap_err().contains("timed out"), "should time out");
+        assert!(start.elapsed() < Duration::from_secs(5), "should return promptly after kill");
+        // 0 = no limit still works for quick commands.
+        assert_eq!(shell("exit 3", 0).unwrap().0, 3);
+    }
+
+    #[test]
+    fn task_tool_only_offered_with_subagents() {
+        let plain = schemas(&Profile::default());
+        assert!(!plain.as_array().unwrap().iter().any(|t| t["function"]["name"] == "task"));
+        let orch = Profile { subagents: vec!["small".into()], ..Profile::default() };
+        let t = schemas(&orch);
+        let task = t.as_array().unwrap().iter().find(|t| t["function"]["name"] == "task").unwrap().clone();
+        assert_eq!(task["function"]["parameters"]["properties"]["role"]["enum"][0], "small");
     }
 
     #[test]

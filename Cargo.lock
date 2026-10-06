@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "tern"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "glob",
  "regex",
@@ -508,6 +508,7 @@ dependencies = [
  "serde_json",
  "toml",
  "ureq",
+ "wait-timeout",
  "walkdir",
 ]
 
@@ -609,6 +610,15 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "wait-timeout"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "walkdir"
