@@ -157,6 +157,52 @@ const MAX_SUBAGENT_DEPTH: usize = 2;
 /// must not burn the whole step budget resending the context every retry.
 const MAX_CHECK_RETRIES: usize = 3;
 
+/// One tool call, parsed once so it can be logged, executed (possibly on
+/// another thread), and paired back to its id in order.
+struct Call {
+    id: String,
+    name: String,
+    label: String,
+    args: Result<Value, String>,
+}
+
+impl Call {
+    fn parse(c: &Value, lenient: bool) -> Call {
+        let id = c["id"].as_str().unwrap_or("").to_string();
+        let name = c["function"]["name"].as_str().unwrap_or("").to_string();
+        let raw = c["function"]["arguments"].as_str().unwrap_or("{}");
+        let args = parse::parse_args(raw, lenient);
+        let label = match &args {
+            Ok(a) => format!("{name} {}", tools::summarize_args(a)),
+            Err(_) => name.clone(),
+        };
+        Call { id, name, label, args }
+    }
+
+    /// A subagent delegation with valid arguments (the only thing we parallelize).
+    fn is_subagent(&self) -> bool {
+        self.name == "task" && self.args.is_ok()
+    }
+}
+
+/// Execute one call on the current thread. `task` is handled here, not in
+/// Tools, because spawning a subagent needs Config, which Tools doesn't hold.
+fn run_call(cfg: &llm::Config, tools: &mut tools::Tools, c: &Call, depth: usize, ind: &str) -> String {
+    match &c.args {
+        Ok(args) => {
+            eprintln!("{ind}  · {}", c.label);
+            if c.name == "task" {
+                run_subagent(cfg, args, depth)
+            } else {
+                tools.run(&c.name, args)
+            }
+        }
+        // Tell the model what went wrong instead of guessing; most models fix
+        // malformed JSON on the next try.
+        Err(e) => format!("error: arguments were not valid JSON ({e})"),
+    }
+}
+
 /// Runs the agent loop to completion. `depth` is 0 for the top-level agent and
 /// increments for each nested subagent; it controls log indentation and
 /// whether assistant text prints to stdout (only the top level does). Returns
@@ -236,32 +282,51 @@ fn run_turn(
             return (Outcome::Done, step, last_text);
         }
 
-        let mut changed = false;
-        for c in calls {
-            let id = c["id"].as_str().unwrap_or("");
-            let name = c["function"]["name"].as_str().unwrap_or("");
-            let raw = c["function"]["arguments"].as_str().unwrap_or("{}");
-            let (label, out) = match parse::parse_args(raw, lenient) {
-                Ok(args) => {
-                    let label = format!("{name} {}", tools::summarize_args(&args));
-                    eprintln!("{ind}  · {label}");
-                    // task is handled here (not in Tools) because spawning a
-                    // subagent needs Config, which Tools deliberately doesn't hold.
-                    let out = if name == "task" {
-                        run_subagent(cfg, &args, depth)
-                    } else {
-                        tools.run(name, &args)
-                    };
-                    (label, out)
+        // Parse every call once up front, then execute. Results are collected
+        // by call index so they can be pushed back in order (each tool_call_id
+        // must pair with its result) regardless of execution order.
+        let parsed: Vec<Call> = calls.iter().map(|c| Call::parse(c, lenient)).collect();
+        let mut outs: Vec<Option<String>> = vec![None; parsed.len()];
+
+        let subagent_calls = parsed.iter().filter(|c| c.is_subagent()).count();
+        if cfg.profile.parallel_subagents && subagent_calls >= 2 {
+            // Independent subagents run concurrently (scope lets the threads
+            // borrow cfg/args without 'static); each builds its own `tools`, so
+            // there's no shared mutable state between them.
+            std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for (i, c) in parsed.iter().enumerate() {
+                    if c.is_subagent() {
+                        eprintln!("{ind}  · {}", c.label);
+                        let args = c.args.as_ref().unwrap();
+                        handles.push((i, scope.spawn(move || run_subagent(cfg, args, depth))));
+                    }
                 }
-                // Tell the model what went wrong instead of guessing; most
-                // models fix malformed JSON on the next try.
-                Err(e) => (name.to_string(), format!("error: arguments were not valid JSON ({e})")),
-            };
+                for (i, h) in handles {
+                    outs[i] = Some(h.join().unwrap_or_else(|_| "error: subagent thread panicked".into()));
+                }
+            });
+            // Non-subagent calls run after the subagents have joined, not
+            // alongside them: the parent's own edits/bash would otherwise race
+            // a subagent mutating the shared working tree.
+            for (i, c) in parsed.iter().enumerate() {
+                if !c.is_subagent() {
+                    outs[i] = Some(run_call(cfg, tools, c, depth, &ind));
+                }
+            }
+        } else {
+            for (i, c) in parsed.iter().enumerate() {
+                outs[i] = Some(run_call(cfg, tools, c, depth, &ind));
+            }
+        }
+
+        let mut changed = false;
+        for (i, c) in parsed.iter().enumerate() {
+            let out = outs[i].take().unwrap_or_default();
             // A subagent may have edited files on disk, so run the parent's
             // check afterward too.
-            changed |= (matches!(name, "edit" | "write") && out.starts_with("ok")) || name == "task";
-            ctx.push_tool_result(id, label, out);
+            changed |= (matches!(c.name.as_str(), "edit" | "write") && out.starts_with("ok")) || c.name == "task";
+            ctx.push_tool_result(&c.id, c.label.clone(), out);
         }
 
         made_edits |= changed;
@@ -316,4 +381,25 @@ fn run_subagent(cfg: &llm::Config, a: &Value, depth: usize) -> String {
 
     let summary = if summary.trim().is_empty() { "(subagent returned no summary)" } else { summary.trim() };
     format!("[subagent {role}: {outcome:?}, {steps} steps]\n{summary}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn call_parse_identifies_what_can_be_parallelized() {
+        let task = json!({"id": "a", "function":
+            {"name": "task", "arguments": r#"{"role":"small","description":"x"}"#}});
+        let c = Call::parse(&task, true);
+        assert!(c.is_subagent() && c.id == "a" && c.label.starts_with("task"));
+
+        let read = json!({"id": "b", "function": {"name": "read", "arguments": r#"{"path":"p"}"#}});
+        assert!(!Call::parse(&read, true).is_subagent());
+
+        // A malformed task isn't parallelized — it runs inline so run_call can
+        // report the parse error to the model.
+        let bad = json!({"id": "c", "function": {"name": "task", "arguments": "{not json"}});
+        assert!(!Call::parse(&bad, false).is_subagent());
+    }
 }

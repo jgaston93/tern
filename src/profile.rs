@@ -66,6 +66,10 @@ pub struct Profile {
     /// Language-server commands by file extension, e.g. { rs = "rust-analyzer" }.
     /// Non-empty enables the `def`/`refs` tools.
     pub lsp: HashMap<String, String>,
+    /// Run multiple `task` calls from one step concurrently. Only speeds things
+    /// up on a backend that decodes requests in parallel (vLLM, llama.cpp
+    /// --parallel); give subagents non-overlapping work (shared working tree).
+    pub parallel_subagents: bool,
 }
 
 impl Default for Profile {
@@ -94,6 +98,7 @@ impl Default for Profile {
             grammar: None,
             response_format: None,
             lsp: HashMap::new(),
+            parallel_subagents: false,
         }
     }
 }

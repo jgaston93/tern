@@ -41,6 +41,9 @@
 #                   def/refs tools, e.g. lsp = { rs = "rust-analyzer" }. They
 #                   resolve a symbol to path:line: source via the server (precise
 #                   where grep is ambiguous); a missing server falls back to grep.
+#   parallel_subagents  run several task delegations from one step at once. Only
+#                   helps on a backend that decodes in parallel (vLLM, llama.cpp
+#                   --parallel); give subagents non-overlapping work (shared tree).
 
 [[profile]]
 name = "default"
