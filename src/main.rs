@@ -10,7 +10,7 @@ use context::Context;
 use profile::{EditFormat, Profile};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const HELP: &str = "tern: minimal coding agent
 
@@ -321,13 +321,17 @@ fn run_turn(
             // withheld — see sandbox.rs).
             let idx: Vec<usize> = parsed.iter().enumerate().filter(|(_, c)| c.is_subagent()).map(|(i, _)| i).collect();
             let batch = if cfg.profile.max_parallel == 0 { idx.len() } else { cfg.profile.max_parallel };
+            // Sandbox/snapshot/merge against *our* working root, not the process
+            // CWD: a parallel subagent is itself rooted in a sandbox, so its own
+            // nested parallel batch must stay inside that sandbox.
+            let base_root = tools.root().to_path_buf();
             for chunk in idx.chunks(batch) {
                 // Snapshot per chunk: a later chunk is seeded from (and diffed
                 // against) the tree the earlier chunks already merged into.
-                let base = sandbox::snapshot(Path::new("."));
+                let base = sandbox::snapshot(&base_root);
                 let mut boxes: Vec<(usize, Option<sandbox::Sandbox>)> = Vec::new();
                 for &i in chunk {
-                    match sandbox::Sandbox::create(Path::new(".")) {
+                    match sandbox::Sandbox::create(&base_root) {
                         Ok(sb) => boxes.push((i, Some(sb))),
                         // Degrade to the shared tree rather than failing the task.
                         Err(e) => {
@@ -356,7 +360,7 @@ fn run_turn(
                 let conflicts = sandbox::conflicts(&per);
                 for (i, ch) in &per {
                     let dir = &boxes.iter().find(|(j, _)| j == i).unwrap().1.as_ref().unwrap().dir;
-                    let note = match sandbox::merge(dir, ch, &conflicts, Path::new(".")) {
+                    let note = match sandbox::merge(dir, ch, &conflicts, &base_root) {
                         Ok(s) if !s.is_empty() => format!(
                             "\n[conflict: your changes to {} were not applied — another parallel subagent changed the same file(s); split the work or run them sequentially]",
                             s.join(", ")

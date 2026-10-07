@@ -131,6 +131,14 @@ impl Tools {
         self
     }
 
+    /// The directory this agent's file ops resolve against. For a parallel
+    /// subagent whose own tools are already rooted in a sandbox, its nested
+    /// parallel batch must snapshot/copy/merge against *this* root, not the
+    /// process CWD, or the nested edits would leak into the real tree.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Resolve a model-supplied relative path against the working root.
     fn path(&self, p: &str) -> PathBuf {
         self.root.join(p)
