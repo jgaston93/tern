@@ -22,7 +22,23 @@ impl Config {
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let model = env("TERN_MODEL").unwrap_or_else(|| "local".into());
         let wanted = profile_name.or_else(|| env("TERN_PROFILE"));
-        let mut profile = crate::profile::select(&model, wanted.as_deref())?;
+        let profile = Self::resolve_profile(&model, wanted.as_deref())?;
+        Ok(Config {
+            base_url: env("TERN_BASE_URL").unwrap_or_else(|| "http://localhost:8080/v1".into()),
+            model,
+            api_key: env("TERN_API_KEY"),
+            max_steps: env("TERN_MAX_STEPS").and_then(|v| v.parse().ok()).unwrap_or(40),
+            yolo: env("TERN_YOLO").is_some(),
+            profile,
+        })
+    }
+
+    /// Select a profile by name (or model match) and apply the env overrides
+    /// that let a one-off `TERN_CTX=8000` work without editing config. Shared by
+    /// startup and mid-session mode switches, so the overrides stick either way.
+    fn resolve_profile(model: &str, wanted: Option<&str>) -> Result<Profile, String> {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let mut profile = crate::profile::select(model, wanted)?;
         if let Some(c) = env("TERN_CTX").and_then(|v| v.parse().ok()) {
             profile.ctx = c;
         }
@@ -38,14 +54,14 @@ impl Config {
         if env("TERN_REQUIRE_CHECK").is_some() {
             profile.require_check_pass = true;
         }
-        Ok(Config {
-            base_url: env("TERN_BASE_URL").unwrap_or_else(|| "http://localhost:8080/v1".into()),
-            model,
-            api_key: env("TERN_API_KEY"),
-            max_steps: env("TERN_MAX_STEPS").and_then(|v| v.parse().ok()).unwrap_or(40),
-            yolo: env("TERN_YOLO").is_some(),
-            profile,
-        })
+        Ok(profile)
+    }
+
+    /// Switch to a named profile mid-session, keeping endpoint, model, and
+    /// credentials. An explicit switch wins over the model-name match.
+    pub fn switch_profile(&mut self, name: &str) -> Result<(), String> {
+        self.profile = Self::resolve_profile(&self.model, Some(name))?;
+        Ok(())
     }
 
     /// A child config for a subagent: same endpoint, model, credentials and

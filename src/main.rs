@@ -15,7 +15,7 @@ use std::path::PathBuf;
 const HELP: &str = "tern: minimal coding agent
 
 usage:
-  tern                      interactive session
+  tern                      interactive session (/plan /build /mode <name> /stats /exit)
   tern -p \"task\"            run one request and exit (exit 0 done, 2 step limit, 1 error)
 options:
   --profile NAME            use a named profile instead of matching on model name
@@ -110,7 +110,7 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn main() {
-    let (args, cfg) = match parse_args().and_then(|a| llm::Config::new(a.profile.clone()).map(|c| (a, c))) {
+    let (args, mut cfg) = match parse_args().and_then(|a| llm::Config::new(a.profile.clone()).map(|c| (a, c))) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: {e}");
@@ -120,7 +120,7 @@ fn main() {
     let p = &cfg.profile;
     let mut ctx = Context::new(&system_prompt(p), p.ctx);
     let mut tools = tools::Tools::new(cfg.yolo, p);
-    let schemas = tools::schemas(p);
+    let mut schemas = tools::schemas(p);
 
     eprintln!(
         "tern · {} @ {} · profile {} · {:?} edits · budget {} tokens",
@@ -148,7 +148,7 @@ fn main() {
         });
     }
 
-    eprintln!("commands: /stats /exit");
+    eprintln!("commands: /plan /build /mode <name> /stats /exit");
     loop {
         print!("\n> ");
         let _ = io::stdout().flush();
@@ -156,12 +156,34 @@ fn main() {
         if io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
             break;
         }
-        match line.trim() {
+        let line = line.trim();
+        let (cmd, arg) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        match cmd {
             "" => continue,
             "/exit" => break,
             "/stats" => ctx.print_stats(),
-            input => {
-                ctx.push(json!({"role": "user", "content": input}));
+            // Switch profiles mid-session, keeping the conversation. /plan and
+            // /build are shortcuts for the matching built-in profiles.
+            "/mode" | "/plan" | "/build" => {
+                let name = match cmd {
+                    "/plan" => "plan",
+                    "/build" => "build",
+                    _ => arg.trim(),
+                };
+                if name.is_empty() {
+                    eprintln!("mode: {} (use /mode <name>)", cfg.profile.name);
+                } else if let Err(e) = cfg.switch_profile(name) {
+                    eprintln!("error: {e}");
+                } else {
+                    let p = &cfg.profile;
+                    ctx.set_system(&system_prompt(p), p.ctx);
+                    tools = tools::Tools::new(cfg.yolo, p);
+                    schemas = tools::schemas(p);
+                    eprintln!("mode {} · {:?} edits · budget {} tokens", p.name, p.edit_format, p.ctx);
+                }
+            }
+            _ => {
+                ctx.push(json!({"role": "user", "content": line}));
                 run_turn(&cfg, &mut ctx, &mut tools, &schemas, 0);
             }
         }

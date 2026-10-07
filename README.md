@@ -19,7 +19,7 @@ TERN_BASE_URL=http://localhost:8080/v1 TERN_MODEL=qwen3-coder ./target/release/t
 | `TERN_MAX_STEPS` | `40` | tool-call iterations per request |
 | `TERN_YOLO` | off | skip shell-command confirmation |
 
-Commands: `/stats` (tokens used, cache hit rate, current context size), `/exit`. Options: `--profile NAME`, `--list-profiles`, `-p TASK`, `--stats-file PATH`.
+Commands: `/plan`, `/build`, `/mode <name>` (switch profile mid-session, keeping the conversation), `/stats` (tokens used, cache hit rate, current context size), `/exit`. Options: `--profile NAME`, `--list-profiles`, `-p TASK`, `--stats-file PATH`.
 
 ## Model profiles
 
@@ -90,4 +90,3 @@ Every request resends the whole history, so a token added early is paid for on e
 ## Next steps worth trying
 1. **Streaming** so long responses don't look frozen.
 2. **Save full shell output to a file** when truncating, and tell the model the path.
-3. **Interactive mode cycling** — `/plan` `/build` `/mode` commands (and eventually a TUI shift+tab) to switch profiles mid-session with shared context, the way Claude Code / OpenCode do.
