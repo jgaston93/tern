@@ -50,6 +50,17 @@ impl Context {
         self.entries.push(Entry { msg, label: String::new(), elided: false });
     }
 
+    /// Swap the system prompt and token budget without touching history, for a
+    /// mid-session mode switch. This necessarily invalidates the prompt cache
+    /// from the first message, but a mode change is an explicit, rare act.
+    pub fn set_system(&mut self, system: &str, budget: usize) {
+        self.budget = budget;
+        match self.entries.first_mut() {
+            Some(e) if e.msg["role"] == "system" => e.msg = json!({"role": "system", "content": system}),
+            _ => self.entries.insert(0, Entry { msg: json!({"role": "system", "content": system}), label: String::new(), elided: false }),
+        }
+    }
+
     /// Append to the most recent tool result (used for check output).
     pub fn append_to_last_tool_result(&mut self, extra: &str) {
         if let Some(e) = self.entries.iter_mut().rev().find(|e| e.msg["role"] == "tool") {
@@ -182,5 +193,22 @@ impl Context {
             "requests {} | prompt {} ({}% cached) | completion {} | context ~{}/{}",
             self.requests, t.prompt, hit, t.completion, self.estimate(), self.budget
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_system_swaps_prompt_and_budget_keeping_history() {
+        let mut c = Context::new("old system", 1000);
+        c.push(json!({"role": "user", "content": "hello"}));
+        c.set_system("new system", 2000);
+        let msgs = c.messages();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["content"], "new system");
+        assert_eq!(msgs[1]["content"], "hello");
+        assert_eq!(c.budget, 2000);
     }
 }
