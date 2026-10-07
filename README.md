@@ -77,7 +77,7 @@ Every request resends the whole history, so a token added early is paid for on e
 - `edit` returns a status line, never the file. Fails loudly on 0 or multiple matches, and hints when a match would succeed ignoring indentation, which saves a retry loop.
 - `read` defaults to 200 numbered lines with paging, clips minified lines to 300 chars, and returns a one-line stub when the same range is read again unchanged.
 - `grep` caps at 50 hits and tells the model how many it missed so it narrows the search instead of reading files.
-- `bash` keeps the first 40 and last 60 lines (first compiler error and final summary), strips ANSI color codes.
+- `bash` keeps the first 40 and last 60 lines (first compiler error and final summary), strips ANSI color codes. When it truncates, the full output is saved to a temp file and the model is given the path, so it can `read` the omitted detail without paying for it up front.
 - `.git`, `target`, `node_modules` etc. are skipped by search.
 
 **History management**
@@ -89,4 +89,3 @@ Every request resends the whole history, so a token added early is paid for on e
 
 ## Next steps worth trying
 1. **Streaming** so long responses don't look frozen.
-2. **Save full shell output to a file** when truncating, and tell the model the path.
