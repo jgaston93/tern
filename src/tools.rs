@@ -314,7 +314,10 @@ impl Tools {
             return "error: user declined this command".into();
         }
         match shell(cmd, self.profile.bash_timeout, &self.root) {
-            Ok((code, text)) => format!("exit {code}\n{}", truncate_middle(&text, BASH_HEAD, BASH_TAIL)),
+            Ok((code, text)) => {
+                let shown = truncate_middle(&text, BASH_HEAD, BASH_TAIL);
+                format!("exit {code}\n{shown}{}", spill(&text, BASH_HEAD, BASH_TAIL))
+            }
             Err(e) => format!("error: {e}"),
         }
     }
@@ -541,6 +544,24 @@ pub fn truncate_middle(s: &str, head: usize, tail: usize) -> String {
     )
 }
 
+/// When `truncate_middle` would drop content (lines omitted, or a line clipped
+/// past LINE_MAX), save the full output to a temp file and return a one-line
+/// pointer so the model can `read` it if it needs the detail. Costs ~15 tokens,
+/// and only when something was actually lost. Returns "" otherwise, or on a
+/// write failure (the truncated view is still useful on its own). The temp file
+/// lives outside the working root, so a sandboxed subagent never merges it back.
+fn spill(full: &str, head: usize, tail: usize) -> String {
+    let lost = full.lines().count() > head + tail || full.lines().any(|l| l.chars().count() > LINE_MAX);
+    if !lost {
+        return String::new();
+    }
+    let path = std::env::temp_dir().join(format!("tern-bash-{:016x}.txt", hash(full)));
+    match fs::write(&path, full) {
+        Ok(_) => format!("\n[full output ({} lines) saved to {} — read it for the omitted detail]", full.lines().count(), path.display()),
+        Err(_) => String::new(),
+    }
+}
+
 fn strip_ansi(s: &str) -> String {
     Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]").unwrap().replace_all(s, "").into_owned()
 }
@@ -587,6 +608,23 @@ mod tests {
         let t = truncate_middle(&s, 3, 2);
         assert!(t.starts_with("line1\nline2\nline3\n[… 195 lines omitted …]"));
         assert!(t.ends_with("line199\nline200"));
+    }
+
+    #[test]
+    fn spill_saves_full_output_only_when_truncated() {
+        // Short output: nothing lost, no spill.
+        assert_eq!(spill("one\ntwo\nthree", 3, 2), "");
+
+        // More lines than head+tail: full output saved to a readable file.
+        let s: String = (1..=50).map(|i| format!("line{i}\n")).collect();
+        let note = spill(&s, 3, 2);
+        assert!(note.contains("full output (50 lines) saved to"));
+        let path = note.rsplit("saved to ").next().unwrap().split(" —").next().unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), s);
+
+        // A single over-long line also loses content and spills.
+        let long = "x".repeat(LINE_MAX + 1);
+        assert!(spill(&long, 3, 2).contains("full output"));
     }
 
     #[test]
@@ -645,6 +683,25 @@ mod tests {
         let p = tmp("fuzzy3", "  a\n  b\n\ta\n\tb\n");
         let r = Tools::new(true, &fuzzy()).run("edit", &json!({"path": p, "old": "a\nb", "new": "c"}));
         assert!(r.contains("matches 2 places ignoring indentation"), "{r}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_spills_long_output_to_a_readable_file() {
+        let mut t = Tools::new(true, &Profile::default());
+        // 300 lines of output: truncated in context, full copy spilled to a file.
+        let r = t.run("bash", &json!({"command": "seq 1 300"}));
+        assert!(r.contains("[… "), "should truncate in context: {r}");
+        assert!(r.contains("full output (300 lines) saved to"), "{r}");
+        // The model can read exactly what the note points at.
+        let path = r.rsplit("saved to ").next().unwrap().split(" —").next().unwrap();
+        let full = fs::read_to_string(path).unwrap();
+        assert_eq!(full.lines().count(), 300);
+        assert!(full.starts_with("1\n") && full.trim_end().ends_with("\n300"));
+
+        // Short output stays inline with no spill note.
+        let r = t.run("bash", &json!({"command": "echo hi"}));
+        assert!(!r.contains("full output"), "{r}");
     }
 
     #[test]
