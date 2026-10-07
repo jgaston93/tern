@@ -221,6 +221,11 @@ fn assemble_stream(
             Ok(v) => v,
             Err(_) => continue, // tolerate a malformed keep-alive chunk
         };
+        // Some servers stream a mid-generation failure as an error object over a
+        // 200 response; surface it rather than returning an empty message.
+        if let Some(err) = chunk.get("error").filter(|e| !e.is_null()) {
+            return Err(format!("stream error: {err}"));
+        }
         if let Some(u) = chunk.get("usage").filter(|u| !u.is_null()) {
             usage = usage_from(u);
         }
@@ -262,6 +267,13 @@ fn assemble_stream(
                 }
             }
         }
+    }
+
+    // A stream that delivered nothing usable (only keep-alives/`[DONE]`, or a
+    // non-streaming error body) mirrors the null-message case the buffered path
+    // rejects. A real turn always carries content, a tool call, or reasoning.
+    if content.is_empty() && calls.is_empty() && reasoning.is_empty() {
+        return Err("unexpected response: empty stream".into());
     }
 
     let mut message = Map::new();
@@ -401,6 +413,33 @@ mod tests {
         // Default keep_reasoning=false: clean() strips it from what's resent.
         assert!(clean(&msg, false).get("reasoning_content").is_none());
         assert_eq!(clean(&msg, true)["reasoning_content"], "thinking");
+    }
+
+    #[test]
+    fn assemble_stream_surfaces_mid_stream_error() {
+        // A server that 200s then streams a failure object must not look like an
+        // empty (successful) turn.
+        let sse = concat!(
+            "data: {\"error\":{\"message\":\"boom\"}}\n",
+            "data: [DONE]\n",
+        );
+        let err = match assemble_stream(sse.as_bytes(), None) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a stream error, got a message"),
+        };
+        assert!(err.contains("boom"), "error text should carry the server message: {err}");
+    }
+
+    #[test]
+    fn assemble_stream_rejects_an_empty_stream() {
+        // Only keep-alives and [DONE]: nothing usable arrived, so it's an error
+        // rather than a silent empty message.
+        let sse = concat!(
+            ": keep-alive\n",
+            "\n",
+            "data: [DONE]\n",
+        );
+        assert!(assemble_stream(sse.as_bytes(), None).is_err());
     }
 
     #[test]

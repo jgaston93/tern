@@ -9,7 +9,7 @@ mod tools;
 use context::Context;
 use profile::{EditFormat, Profile};
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 const HELP: &str = "tern: minimal coding agent
@@ -284,6 +284,9 @@ fn run_turn(
         // streaming, content lands on stdout and reasoning on stderr (dimmed)
         // as it arrives, so we skip the buffered reprint below.
         let (mut streamed_content, mut streamed_reasoning) = (false, false);
+        // Dim reasoning only on a real terminal; a redirected stderr gets plain
+        // text instead of raw escape codes.
+        let stderr_tty = io::stderr().is_terminal();
         let resp = {
             let mut sink = |d: llm::Delta| match d {
                 llm::Delta::Content(s) => {
@@ -293,7 +296,11 @@ fn run_turn(
                 }
                 llm::Delta::Reasoning(s) => {
                     streamed_reasoning = true;
-                    eprint!("\x1b[2m{s}\x1b[0m");
+                    if stderr_tty {
+                        eprint!("\x1b[2m{s}\x1b[0m");
+                    } else {
+                        eprint!("{s}");
+                    }
                     let _ = io::stderr().flush();
                 }
             };
