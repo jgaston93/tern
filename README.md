@@ -46,6 +46,7 @@ What each knob does:
 - **keep_reasoning.** Keeps reasoning text across tool calls within a request (gpt-oss expects this), then drops it at the next user message.
 - **Structured output** (`tool_choice`, `grammar`, `response_format`). Passed through to the server to constrain tool calls at the sampler, so fewer come back as text. `grammar` is llama.cpp GBNF; `response_format` is the vLLM guided / OpenAI object; `tool_choice` stays `"auto"` (`"required"` forces a call every turn and breaks the text-only finish). With a server that reliably emits well-formed calls you can then set `lenient_parsing = false`.
 - **lsp.** Enables `def`/`refs` tools backed by a language server (`lsp = { rs = "rust-analyzer" }`, keyed by file extension). They resolve a symbol to `path:line: source` through the server — precise where grep is ambiguous (overloads, same-named methods) and fewer tokens than reading around. A missing or failed server degrades to a grep hint. Offered only when configured.
+- **parallel_subagents.** Runs multiple `task` delegations from one step concurrently, each in its own context. Only speeds things up on a backend that decodes requests in parallel (vLLM, `llama.cpp --parallel`); a single llama.cpp slot serializes them. Subagents share the working tree, so give them non-overlapping work.
 - **Sampling** fields are sent only when set, because hosted APIs reject some of them. `repeat_penalty` is sent under both the llama.cpp and vLLM names.
 
 Server-side settings matter as much: run llama.cpp with `--jinja` so it uses the model's own chat template, and set Ollama's `num_ctx` explicitly (its default is small and it silently truncates).
@@ -86,4 +87,4 @@ Every request resends the whole history, so a token added early is paid for on e
 ## Next steps worth trying
 1. **Streaming** so long responses don't look frozen.
 2. **Save full shell output to a file** when truncating, and tell the model the path.
-3. **Parallel subagents** so independent `task` delegations run concurrently (worthwhile on a concurrent backend like vLLM or `llama.cpp --parallel`).
+3. **Git-worktree isolation** for parallel subagents, so overlapping edits can't clobber each other.
