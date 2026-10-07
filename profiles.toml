@@ -72,12 +72,15 @@ prompt_extra = "Work by delegating. First task the plan subagent to produce an i
 
 # Read-only planner: no edit/write/bash, so it can only investigate and return a
 # plan. Useful standalone (--profile plan) or as the orchestrator's plan role.
+# Generous ctx (investigation spans many files; the parent only pays the summary).
 [[profile]]
 name = "plan"
+ctx = 65536
 tools = ["read", "grep", "glob"]
 
-# Executor: carries out a plan with full tools and won't finish on a failing check.
-# Paired with `plan` under the orchestrator.
+# Executor: carries out a plan with full tools. With a check configured (its own
+# or one inherited from the run's TERN_CHECK), require_check_pass keeps it from
+# finishing while that check fails. Paired with `plan` under the orchestrator.
 [[profile]]
 name = "build"
 ctx = 65536

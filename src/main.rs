@@ -40,6 +40,8 @@ back. When finished, reply with the plan as your summary."
             s.push('\n');
             s.push_str(&p.prompt_extra);
         }
+        // Returns early: a read-only profile can't delegate (no subagents in
+        // practice), so it skips the edit-oriented and `task` delegation prose.
         return s;
     }
     let change = if p.edit_format == EditFormat::Whole {
