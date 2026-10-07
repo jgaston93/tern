@@ -133,13 +133,17 @@ impl Lsp {
                 return Err(format!("timed out waiting for {method}"));
             }
             match self.rx.recv_timeout(remaining) {
-                Ok(v) if v.get("id").and_then(Value::as_i64) == Some(id) => {
+                // A response carries our id and no `method`. Server-initiated
+                // requests (e.g. window/workDoneProgress/create) reuse the same
+                // integer id space, so match on both or we'd mistake one for our
+                // reply and return its (absent) result as Null.
+                Ok(v) if v.get("method").is_none() && v.get("id").and_then(Value::as_i64) == Some(id) => {
                     if let Some(e) = v.get("error") {
                         return Err(format!("{method}: {e}"));
                     }
                     return Ok(v.get("result").cloned().unwrap_or(Value::Null));
                 }
-                Ok(_) => {} // notification or unrelated id; ignore
+                Ok(_) => {} // notification, server request, or unrelated id; ignore
                 Err(_) => return Err(format!("timed out waiting for {method}")),
             }
         }
@@ -262,7 +266,22 @@ fn path_to_uri(p: &Path) -> String {
     let s = abs.to_string_lossy().replace('\\', "/");
     #[cfg(windows)]
     let s = format!("/{s}"); // file:///C:/...
-    format!("file://{s}")
+    format!("file://{}", percent_encode(&s))
+}
+
+/// Percent-encode a path for a `file://` URI, leaving `/` and the drive-letter
+/// `:` intact. Mirrors `percent_decode` so a path with spaces round-trips.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        let keep = b.is_ascii_alphanumeric() || matches!(b, b'/' | b':' | b'-' | b'.' | b'_' | b'~');
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 fn uri_to_path(uri: &str) -> PathBuf {
@@ -320,5 +339,17 @@ mod tests {
     fn decodes_percent_encoded_uris() {
         assert_eq!(percent_decode("a%20b"), "a b");
         assert_eq!(uri_to_path("file:///tmp/a%20b.rs"), PathBuf::from("/tmp/a b.rs"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn uri_round_trips_a_path_with_spaces() {
+        let dir = std::env::temp_dir().join("tern lsp dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a b.rs");
+        std::fs::write(&p, "fn x() {}\n").unwrap();
+        let uri = path_to_uri(&p);
+        assert!(uri.contains("%20"), "{uri}");
+        assert_eq!(uri_to_path(&uri), p.canonicalize().unwrap());
     }
 }
