@@ -280,11 +280,38 @@ fn run_turn(
         ctx.maintain(cfg, tools);
 
         let sent = ctx.raw_estimate();
-        let resp = match llm::chat(cfg, &ctx.messages(), Some(schemas)) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("{ind}error: {e}");
-                return (Outcome::Error, step, last_text);
+        // Only the top-level agent prints; subagents accumulate silently. When
+        // streaming, content lands on stdout and reasoning on stderr (dimmed)
+        // as it arrives, so we skip the buffered reprint below.
+        let (mut streamed_content, mut streamed_reasoning) = (false, false);
+        let resp = {
+            let mut sink = |d: llm::Delta| match d {
+                llm::Delta::Content(s) => {
+                    streamed_content = true;
+                    print!("{s}");
+                    let _ = io::stdout().flush();
+                }
+                llm::Delta::Reasoning(s) => {
+                    streamed_reasoning = true;
+                    eprint!("\x1b[2m{s}\x1b[0m");
+                    let _ = io::stderr().flush();
+                }
+            };
+            let sink = (depth == 0).then_some(&mut sink as &mut dyn FnMut(llm::Delta));
+            let r = llm::chat(cfg, &ctx.messages(), Some(schemas), sink);
+            // Terminate whichever streams we wrote to before any log/error line.
+            if streamed_content {
+                println!();
+            }
+            if streamed_reasoning {
+                eprintln!();
+            }
+            match r {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("{ind}error: {e}");
+                    return (Outcome::Error, step, last_text);
+                }
             }
         };
         let u = resp.usage;
@@ -300,7 +327,8 @@ fn run_turn(
         }
         if let Some(text) = msg["content"].as_str().filter(|t| !t.trim().is_empty()) {
             let text = text.trim().to_string();
-            if depth == 0 {
+            // Already shown live while streaming; only reprint the buffered path.
+            if depth == 0 && !streamed_content {
                 println!("{text}");
             }
             last_text = text;

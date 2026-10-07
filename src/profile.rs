@@ -47,6 +47,9 @@ pub struct Profile {
     pub prompt_extra: String,
     pub lenient_parsing: bool,
     pub keep_reasoning: bool,
+    /// Stream the reply token-by-token (SSE) instead of buffering the whole
+    /// response. Default on; set false for an endpoint that rejects `stream`.
+    pub stream: bool,
     pub check: Option<String>,
     /// Kill bash/check commands after this many seconds (0 = no limit).
     pub bash_timeout: u64,
@@ -94,6 +97,7 @@ impl Default for Profile {
             prompt_extra: String::new(),
             lenient_parsing: true,
             keep_reasoning: false,
+            stream: true,
             check: None,
             bash_timeout: 120,
             require_check_pass: false,

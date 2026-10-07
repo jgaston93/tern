@@ -173,7 +173,7 @@ impl Context {
             json!({"role": "system", "content": "Summarize this coding session so work can continue without it. Include: goals, decisions, files changed and how, current state, open problems. Under 250 words. No preamble."}),
             json!({"role": "user", "content": transcript}),
         ];
-        let summary = llm::chat(cfg, &req, None)?.message["content"].as_str().unwrap_or("").to_string();
+        let summary = llm::chat(cfg, &req, None, None)?.message["content"].as_str().unwrap_or("").to_string();
 
         // Fold into the current user message rather than adding a second user
         // message, since some local chat templates require strict alternation.
