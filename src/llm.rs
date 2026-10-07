@@ -76,7 +76,10 @@ pub struct Response {
     pub usage: Usage,
 }
 
-pub fn chat(cfg: &Config, messages: &[Value], tools: Option<&Value>) -> Result<Response, String> {
+/// Build the request body. Pure (no I/O) so it's unit-testable: a field is
+/// present only when the profile sets it, because hosted APIs reject unknown or
+/// unsupported keys while local servers fall back to their defaults.
+fn build_body(cfg: &Config, messages: &[Value], tools: Option<&Value>) -> Value {
     let p = &cfg.profile;
     let mut body = json!({
         "model": cfg.model,
@@ -86,8 +89,6 @@ pub fn chat(cfg: &Config, messages: &[Value], tools: Option<&Value>) -> Result<R
     if let Some(t) = tools.filter(|t| t.as_array().is_some_and(|a| !a.is_empty())) {
         body["tools"] = t.clone();
     }
-    // Only send what the profile sets: hosted APIs reject unknown or
-    // unsupported sampling fields, local servers fall back to their defaults.
     let mut set = |k: &str, v: Option<Value>| {
         if let Some(v) = v {
             body[k] = v;
@@ -100,6 +101,21 @@ pub fn chat(cfg: &Config, messages: &[Value], tools: Option<&Value>) -> Result<R
     // llama.cpp calls it repeat_penalty, vLLM repetition_penalty.
     set("repeat_penalty", p.repeat_penalty.map(Value::from));
     set("repetition_penalty", p.repeat_penalty.map(Value::from));
+    // Structured-output constraints: force well-formed tool calls at the server
+    // so fewer come back as text for parse.rs to recover.
+    set("tool_choice", p.tool_choice.clone().map(Value::from));
+    set("grammar", p.grammar.clone().map(Value::from));
+    if let Some(rf) = &p.response_format {
+        if let Ok(v) = serde_json::to_value(rf) {
+            body["response_format"] = v;
+        }
+    }
+    body
+}
+
+pub fn chat(cfg: &Config, messages: &[Value], tools: Option<&Value>) -> Result<Response, String> {
+    let p = &cfg.profile;
+    let body = build_body(cfg, messages, tools);
 
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let mut req = ureq::post(&url).timeout(Duration::from_secs(600));
@@ -161,4 +177,37 @@ fn clean(msg: &Value, keep_reasoning: bool) -> Value {
         out.insert("tool_calls".into(), json!(calls));
     }
     Value::Object(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::Profile;
+
+    fn cfg(profile: Profile) -> Config {
+        Config { base_url: "x".into(), model: "m".into(), api_key: None, max_steps: 1, yolo: true, profile }
+    }
+
+    #[test]
+    fn build_body_sends_only_what_is_set() {
+        // Default profile: no sampling or constraint keys leak into the body.
+        let b = build_body(&cfg(Profile::default()), &[], None);
+        assert_eq!(b["model"], "m");
+        for k in ["temperature", "tool_choice", "grammar", "response_format", "tools"] {
+            assert!(b.get(k).is_none(), "{k} should be absent by default");
+        }
+
+        let p = Profile {
+            temperature: Some(0.3),
+            tool_choice: Some("auto".into()),
+            grammar: Some("root ::= \"x\"".into()),
+            response_format: Some(toml::from_str::<toml::Value>("type = \"json_object\"").unwrap()),
+            ..Profile::default()
+        };
+        let b = build_body(&cfg(p), &[], None);
+        assert_eq!(b["temperature"], 0.3);
+        assert_eq!(b["tool_choice"], "auto");
+        assert_eq!(b["grammar"], "root ::= \"x\"");
+        assert_eq!(b["response_format"]["type"], "json_object");
+    }
 }
