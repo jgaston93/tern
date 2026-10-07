@@ -2,6 +2,7 @@
 //! parsing leniency. See profiles.toml for the built-ins and field docs.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 const BUILTIN: &str = include_str!("../profiles.toml");
@@ -62,6 +63,9 @@ pub struct Profile {
     pub tool_choice: Option<String>,
     pub grammar: Option<String>,
     pub response_format: Option<toml::Value>,
+    /// Language-server commands by file extension, e.g. { rs = "rust-analyzer" }.
+    /// Non-empty enables the `def`/`refs` tools.
+    pub lsp: HashMap<String, String>,
 }
 
 impl Default for Profile {
@@ -89,6 +93,7 @@ impl Default for Profile {
             tool_choice: None,
             grammar: None,
             response_format: None,
+            lsp: HashMap::new(),
         }
     }
 }

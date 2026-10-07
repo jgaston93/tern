@@ -1,6 +1,6 @@
 # tern
 
-A minimal agentic coding CLI in Rust (~1,300 lines), built around spending as few tokens as possible per task and around making open-weight models reliable. Talks to any OpenAI-compatible endpoint: llama.cpp server, Ollama, vLLM, LM Studio, OpenRouter, OpenAI.
+A minimal agentic coding CLI in Rust (~2,000 lines), built around spending as few tokens as possible per task and around making open-weight models reliable. Talks to any OpenAI-compatible endpoint: llama.cpp server, Ollama, vLLM, LM Studio, OpenRouter, OpenAI.
 
 ```sh
 cargo build --release
@@ -45,6 +45,7 @@ What each knob does:
 - **check.** Runs after any step that changed files. A pass costs the model one line (`[check: passed]`); a failure includes the truncated output, so compiler errors arrive without the model having to ask.
 - **keep_reasoning.** Keeps reasoning text across tool calls within a request (gpt-oss expects this), then drops it at the next user message.
 - **Structured output** (`tool_choice`, `grammar`, `response_format`). Passed through to the server to constrain tool calls at the sampler, so fewer come back as text. `grammar` is llama.cpp GBNF; `response_format` is the vLLM guided / OpenAI object; `tool_choice` stays `"auto"` (`"required"` forces a call every turn and breaks the text-only finish). With a server that reliably emits well-formed calls you can then set `lenient_parsing = false`.
+- **lsp.** Enables `def`/`refs` tools backed by a language server (`lsp = { rs = "rust-analyzer" }`, keyed by file extension). They resolve a symbol to `path:line: source` through the server — precise where grep is ambiguous (overloads, same-named methods) and fewer tokens than reading around. A missing or failed server degrades to a grep hint. Offered only when configured.
 - **Sampling** fields are sent only when set, because hosted APIs reject some of them. `repeat_penalty` is sent under both the llama.cpp and vLLM names.
 
 Server-side settings matter as much: run llama.cpp with `--jinja` so it uses the model's own chat template, and set Ollama's `num_ctx` explicitly (its default is small and it silently truncates).
@@ -83,8 +84,6 @@ Every request resends the whole history, so a token added early is paid for on e
 - Token estimates are calibrated against the real `usage.prompt_tokens` the server reports.
 
 ## Next steps worth trying
-1. **LSP tools** (`definition`, `references` via clangd or rust-analyzer), especially for C++ where grep is ambiguous.
-2. **Command timeout** for `bash` (currently a hung command hangs the agent).
-3. **Streaming** so long responses don't look frozen.
-4. **Save full shell output to a file** when truncating, and tell the model the path.
-5. **Grammar-constrained tool calls** (llama.cpp GBNF / JSON schema) as a profile option, for models that still produce malformed calls.
+1. **Streaming** so long responses don't look frozen.
+2. **Save full shell output to a file** when truncating, and tell the model the path.
+3. **Parallel subagents** so independent `task` delegations run concurrently (worthwhile on a concurrent backend like vLLM or `llama.cpp --parallel`).

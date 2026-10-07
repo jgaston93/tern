@@ -1,5 +1,6 @@
 mod context;
 mod llm;
+mod lsp;
 mod parse;
 mod profile;
 mod tools;
@@ -170,14 +171,16 @@ fn run_turn(
 ) -> (Outcome, usize, String) {
     let lenient = cfg.profile.lenient_parsing;
     let ind = "  ".repeat(depth);
-    // Tool names the lenient parser will recognise in text form.
-    let known: Vec<&str> = if cfg.profile.subagents.is_empty() {
-        tools::ALL_TOOLS.to_vec()
-    } else {
-        let mut v = tools::ALL_TOOLS.to_vec();
-        v.push("task");
-        v
-    };
+    // Tool names the lenient parser will recognise in text form: the always-on
+    // set plus any the profile opts into.
+    let mut known: Vec<&str> = tools::ALL_TOOLS.to_vec();
+    if !cfg.profile.subagents.is_empty() {
+        known.push("task");
+    }
+    if !cfg.profile.lsp.is_empty() {
+        known.push("def");
+        known.push("refs");
+    }
     let mut last_text = String::new();
     // Tracked across the whole turn for `require_check_pass`: whether the agent
     // actually changed anything (a red check it never touched isn't its to fix),

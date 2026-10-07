@@ -37,6 +37,10 @@
 #                   [profile.response_format] \n type = "json_object"
 #                   Constraining output means fewer tool calls arrive as text, so
 #                   with a reliable server you can set lenient_parsing = false.
+#   lsp             language-server commands by file extension, enabling the
+#                   def/refs tools, e.g. lsp = { rs = "rust-analyzer" }. They
+#                   resolve a symbol to path:line: source via the server (precise
+#                   where grep is ambiguous); a missing server falls back to grep.
 
 [[profile]]
 name = "default"
