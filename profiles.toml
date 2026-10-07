@@ -23,6 +23,12 @@
 #   lenient_parsing recover tool calls written as text, repair sloppy JSON
 #   keep_reasoning  keep reasoning text within the current request
 #   check           command run after edits, e.g. "cargo check --message-format short"
+#   bash_timeout    kill bash/check after N seconds (default 120; 0 = no limit)
+#   require_check_pass  don't let the model finish while `check` fails; re-prompt
+#                   instead (only if it edited something, up to a few retries)
+#   subagents       profile names this agent may delegate to via the `task` tool
+#                   (empty = ordinary single agent; the child's intermediate tokens
+#                   never enter this agent's context, only its final summary does)
 
 [[profile]]
 name = "default"
@@ -36,6 +42,16 @@ match = ["claude", "gpt-5", "gemini"]
 ctx = 128000
 edit_format = "exact"
 lenient_parsing = false
+
+# Orchestrator: plans and delegates self-contained subtasks to `small` subagents,
+# paying only for each subtask's final summary rather than its reads/edits/output.
+# Select with --profile orchestrator. Point it at your strongest available model.
+[[profile]]
+name = "orchestrator"
+ctx = 128000
+edit_format = "exact"
+subagents = ["small"]
+require_check_pass = true
 
 [[profile]]
 name = "qwen3-coder"

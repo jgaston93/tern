@@ -47,6 +47,13 @@ pub struct Profile {
     pub lenient_parsing: bool,
     pub keep_reasoning: bool,
     pub check: Option<String>,
+    /// Kill bash/check commands after this many seconds (0 = no limit).
+    pub bash_timeout: u64,
+    /// Refuse to finish while `check` is failing (re-prompt instead).
+    pub require_check_pass: bool,
+    /// Profile names this agent may spawn via the `task` tool.
+    /// Empty = no `task` tool, i.e. an ordinary single agent.
+    pub subagents: Vec<String>,
 }
 
 impl Default for Profile {
@@ -68,6 +75,9 @@ impl Default for Profile {
             lenient_parsing: true,
             keep_reasoning: false,
             check: None,
+            bash_timeout: 120,
+            require_check_pass: false,
+            subagents: vec![],
         }
     }
 }
@@ -146,6 +156,11 @@ mod tests {
         let s = select("x", Some("small")).unwrap();
         assert!(!s.tool_enabled("edit") && s.tool_enabled("write") && !s.tool_enabled("glob"));
         assert!(select("x", Some("nope")).is_err());
+        // New fields: defaults, and the orchestrator built-in enables subagents.
+        assert_eq!(p.bash_timeout, 120);
+        assert!(!p.require_check_pass && p.subagents.is_empty());
+        let o = select("x", Some("orchestrator")).unwrap();
+        assert_eq!(o.subagents, vec!["small".to_string()]);
     }
 
     #[test]

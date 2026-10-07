@@ -32,6 +32,12 @@ impl Config {
         if let Some(c) = env("TERN_CHECK") {
             profile.check = Some(c);
         }
+        if let Some(t) = env("TERN_BASH_TIMEOUT").and_then(|v| v.parse().ok()) {
+            profile.bash_timeout = t;
+        }
+        if env("TERN_REQUIRE_CHECK").is_some() {
+            profile.require_check_pass = true;
+        }
         Ok(Config {
             base_url: env("TERN_BASE_URL").unwrap_or_else(|| "http://localhost:8080/v1".into()),
             model,
@@ -40,6 +46,21 @@ impl Config {
             yolo: env("TERN_YOLO").is_some(),
             profile,
         })
+    }
+
+    /// A child config for a subagent: same endpoint, model, credentials and
+    /// limits, but a different profile (so subagents can run their own sampling,
+    /// tool set, and edit format). The model is shared — it comes from the
+    /// environment, not the profile.
+    pub fn for_subagent(&self, profile: Profile) -> Config {
+        Config {
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            api_key: self.api_key.clone(),
+            max_steps: self.max_steps,
+            yolo: self.yolo,
+            profile,
+        }
     }
 }
 
