@@ -26,6 +26,24 @@ env: TERN_BASE_URL TERN_MODEL TERN_API_KEY TERN_PROFILE TERN_CTX TERN_MAX_TOKENS
 /// between requests, so system prompt + tool schemas form a cacheable prefix.
 fn system_prompt(p: &Profile) -> String {
     let find = if p.tool_enabled("glob") { "grep/glob" } else { "grep" };
+    // A profile with no edit/write/bash can only investigate, so it gets a
+    // planning prompt instead of the (wrong, token-wasting) "change files" one.
+    let read_only = !(p.tool_enabled("edit") || p.tool_enabled("write") || p.tool_enabled("bash"));
+    if read_only {
+        let mut s = format!(
+            "You are a planning agent in the user's repository. Find code with {find} and read \
+only the ranges you need; you cannot modify files. Produce a concise, step-by-step \
+implementation plan naming the files and functions to change. Don't repeat file contents \
+back. When finished, reply with the plan as your summary."
+        );
+        if !p.prompt_extra.is_empty() {
+            s.push('\n');
+            s.push_str(&p.prompt_extra);
+        }
+        // Returns early: a read-only profile can't delegate (no subagents in
+        // practice), so it skips the edit-oriented and `task` delegation prose.
+        return s;
+    }
     let change = if p.edit_format == EditFormat::Whole {
         "To change a file, read it, then write its complete new content."
     } else {
@@ -401,5 +419,16 @@ mod tests {
         // report the parse error to the model.
         let bad = json!({"id": "c", "function": {"name": "task", "arguments": "{not json"}});
         assert!(!Call::parse(&bad, false).is_subagent());
+    }
+
+    #[test]
+    fn read_only_profile_gets_a_planning_prompt() {
+        let mut p = Profile::default();
+        p.tools = vec!["read".into(), "grep".into()];
+        let s = system_prompt(&p);
+        assert!(s.contains("planning agent") && s.contains("cannot modify"));
+        assert!(!s.contains("edit"));
+        // A full-access profile still gets the edit-oriented prompt.
+        assert!(system_prompt(&Profile::default()).contains("edit"));
     }
 }

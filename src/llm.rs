@@ -52,7 +52,13 @@ impl Config {
     /// limits, but a different profile (so subagents can run their own sampling,
     /// tool set, and edit format). The model is shared — it comes from the
     /// environment, not the profile.
-    pub fn for_subagent(&self, profile: Profile) -> Config {
+    pub fn for_subagent(&self, mut profile: Profile) -> Config {
+        // Inherit the parent's check unless the child sets its own, so a
+        // child's `require_check_pass` actually gates — `TERN_CHECK` lands on
+        // the selected profile, and without this it would never reach a child.
+        if profile.check.is_none() {
+            profile.check = self.profile.check.clone();
+        }
         Config {
             base_url: self.base_url.clone(),
             model: self.model.clone(),
@@ -209,5 +215,16 @@ mod tests {
         assert_eq!(b["tool_choice"], "auto");
         assert_eq!(b["grammar"], "root ::= \"x\"");
         assert_eq!(b["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn subagent_inherits_parent_check_unless_it_sets_its_own() {
+        let parent = cfg(Profile { check: Some("cargo check".into()), ..Profile::default() });
+        // Child with no check of its own picks up the parent's.
+        let child = parent.for_subagent(Profile::default());
+        assert_eq!(child.profile.check.as_deref(), Some("cargo check"));
+        // A child that sets its own keeps it.
+        let child = parent.for_subagent(Profile { check: Some("make test".into()), ..Profile::default() });
+        assert_eq!(child.profile.check.as_deref(), Some("make test"));
     }
 }
