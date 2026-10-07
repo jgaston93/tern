@@ -291,9 +291,8 @@ fn run_turn(
         let subagent_calls = parsed.iter().filter(|c| c.is_subagent()).count();
         if cfg.profile.parallel_subagents && subagent_calls >= 2 {
             // Independent subagents run concurrently (scope lets the threads
-            // borrow cfg/args without 'static); everything else runs inline on
-            // this thread. The two never touch `tools` at once — run_subagent
-            // builds its own, so there's no shared mutable state.
+            // borrow cfg/args without 'static); each builds its own `tools`, so
+            // there's no shared mutable state between them.
             std::thread::scope(|scope| {
                 let mut handles = Vec::new();
                 for (i, c) in parsed.iter().enumerate() {
@@ -301,14 +300,20 @@ fn run_turn(
                         eprintln!("{ind}  · {}", c.label);
                         let args = c.args.as_ref().unwrap();
                         handles.push((i, scope.spawn(move || run_subagent(cfg, args, depth))));
-                    } else {
-                        outs[i] = Some(run_call(cfg, tools, c, depth, &ind));
                     }
                 }
                 for (i, h) in handles {
                     outs[i] = Some(h.join().unwrap_or_else(|_| "error: subagent thread panicked".into()));
                 }
             });
+            // Non-subagent calls run after the subagents have joined, not
+            // alongside them: the parent's own edits/bash would otherwise race
+            // a subagent mutating the shared working tree.
+            for (i, c) in parsed.iter().enumerate() {
+                if !c.is_subagent() {
+                    outs[i] = Some(run_call(cfg, tools, c, depth, &ind));
+                }
+            }
         } else {
             for (i, c) in parsed.iter().enumerate() {
                 outs[i] = Some(run_call(cfg, tools, c, depth, &ind));
