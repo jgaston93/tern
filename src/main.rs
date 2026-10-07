@@ -3,12 +3,14 @@ mod llm;
 mod lsp;
 mod parse;
 mod profile;
+mod sandbox;
 mod tools;
 
 use context::Context;
 use profile::{EditFormat, Profile};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 
 const HELP: &str = "tern: minimal coding agent
 
@@ -210,7 +212,7 @@ fn run_call(cfg: &llm::Config, tools: &mut tools::Tools, c: &Call, depth: usize,
         Ok(args) => {
             eprintln!("{ind}  · {}", c.label);
             if c.name == "task" {
-                run_subagent(cfg, args, depth)
+                run_subagent(cfg, args, depth, None)
             } else {
                 tools.run(&c.name, args)
             }
@@ -313,21 +315,59 @@ fn run_turn(
             // there's no shared mutable state between them. They run in batches
             // of `max_parallel` so a step with many `task` calls doesn't open
             // all the threads/connections at once; 0 means no clamp.
+            // Each parallel subagent edits a private sandbox copy of the tree,
+            // not the shared one, so their writes can't clobber each other; its
+            // changes are merged back after it joins (files two touched are
+            // withheld — see sandbox.rs).
             let idx: Vec<usize> = parsed.iter().enumerate().filter(|(_, c)| c.is_subagent()).map(|(i, _)| i).collect();
             let batch = if cfg.profile.max_parallel == 0 { idx.len() } else { cfg.profile.max_parallel };
             for chunk in idx.chunks(batch) {
+                // Snapshot per chunk: a later chunk is seeded from (and diffed
+                // against) the tree the earlier chunks already merged into.
+                let base = sandbox::snapshot(Path::new("."));
+                let mut boxes: Vec<(usize, Option<sandbox::Sandbox>)> = Vec::new();
+                for &i in chunk {
+                    match sandbox::Sandbox::create(Path::new(".")) {
+                        Ok(sb) => boxes.push((i, Some(sb))),
+                        // Degrade to the shared tree rather than failing the task.
+                        Err(e) => {
+                            eprintln!("{ind}  [sandbox unavailable ({e}); {} runs in the shared tree]", parsed[i].label);
+                            boxes.push((i, None));
+                        }
+                    }
+                }
                 std::thread::scope(|scope| {
                     let mut handles = Vec::new();
-                    for &i in chunk {
-                        let c = &parsed[i];
+                    for (i, sb) in &boxes {
+                        let (i, c) = (*i, &parsed[*i]);
                         eprintln!("{ind}  · {}", c.label);
                         let args = c.args.as_ref().unwrap();
-                        handles.push((i, scope.spawn(move || run_subagent(cfg, args, depth))));
+                        let root = sb.as_ref().map(|s| s.dir.clone());
+                        handles.push((i, scope.spawn(move || run_subagent(cfg, args, depth, root))));
                     }
                     for (i, h) in handles {
                         outs[i] = Some(h.join().unwrap_or_else(|_| "error: subagent thread panicked".into()));
                     }
                 });
+                // Merge each sandbox back, telling any subagent whose file a
+                // sibling also changed that its write was withheld.
+                let per: Vec<(usize, sandbox::Changes)> =
+                    boxes.iter().filter_map(|(i, sb)| sb.as_ref().map(|s| (*i, s.changes(&base)))).collect();
+                let conflicts = sandbox::conflicts(&per);
+                for (i, ch) in &per {
+                    let dir = &boxes.iter().find(|(j, _)| j == i).unwrap().1.as_ref().unwrap().dir;
+                    let note = match sandbox::merge(dir, ch, &conflicts, Path::new(".")) {
+                        Ok(s) if !s.is_empty() => format!(
+                            "\n[conflict: your changes to {} were not applied — another parallel subagent changed the same file(s); split the work or run them sequentially]",
+                            s.join(", ")
+                        ),
+                        Ok(_) => continue,
+                        Err(e) => format!("\n[warning: merging your changes back failed: {e}]"),
+                    };
+                    if let Some(o) = outs[*i].as_mut() {
+                        o.push_str(&note);
+                    }
+                }
             }
             // Non-subagent calls run after the subagents have joined, not
             // alongside them: the parent's own edits/bash would otherwise race
@@ -373,8 +413,9 @@ fn run_turn(
 
 /// Run a delegated subtask in its own context and budget, returning only its
 /// final summary to the caller. The subagent's reads/edits/output never enter
-/// the parent's history — that isolation is the whole point.
-fn run_subagent(cfg: &llm::Config, a: &Value, depth: usize) -> String {
+/// the parent's history — that isolation is the whole point. `root`, when set,
+/// roots its file ops in a private sandbox copy of the tree (parallel mode).
+fn run_subagent(cfg: &llm::Config, a: &Value, depth: usize, root: Option<PathBuf>) -> String {
     if depth + 1 > MAX_SUBAGENT_DEPTH {
         return format!("error: subagent depth limit ({MAX_SUBAGENT_DEPTH}) reached");
     }
@@ -394,6 +435,9 @@ fn run_subagent(cfg: &llm::Config, a: &Value, depth: usize) -> String {
     let p = &child_cfg.profile;
     let mut child_ctx = Context::new(&system_prompt(p), p.ctx);
     let mut child_tools = tools::Tools::new(child_cfg.yolo, p);
+    if let Some(root) = root {
+        child_tools = child_tools.in_dir(root);
+    }
     let child_schemas = tools::schemas(p);
 
     eprintln!("{}╭─ subagent [{role}] {}", "  ".repeat(depth), tools::clip(description, 60));

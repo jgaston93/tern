@@ -108,6 +108,9 @@ You get back only its final summary, not its intermediate work, so give complete
 pub struct Tools {
     yolo: bool,
     profile: Profile,
+    /// Directory every relative path (and bash/check/lsp) resolves against.
+    /// "." for an ordinary agent; a copied sandbox dir for an isolated subagent.
+    root: PathBuf,
     /// Hash of what each read range last returned. Lets a repeat read return a
     /// one-line stub instead of the same 200 lines again.
     seen: HashMap<String, u64>,
@@ -118,7 +121,19 @@ pub struct Tools {
 
 impl Tools {
     pub fn new(yolo: bool, profile: &Profile) -> Self {
-        Tools { yolo, profile: profile.clone(), seen: HashMap::new(), lsp: HashMap::new() }
+        Tools { yolo, profile: profile.clone(), root: PathBuf::from("."), seen: HashMap::new(), lsp: HashMap::new() }
+    }
+
+    /// Root this agent's file ops at `root` (a sandbox copy of the tree), so a
+    /// parallel subagent can't clobber another's edits in the shared tree.
+    pub fn in_dir(mut self, root: PathBuf) -> Self {
+        self.root = root;
+        self
+    }
+
+    /// Resolve a model-supplied relative path against the working root.
+    fn path(&self, p: &str) -> PathBuf {
+        self.root.join(p)
     }
 
     /// Called when old results are dropped from context: the model no longer
@@ -139,8 +154,8 @@ impl Tools {
             "read" => self.read(a),
             "edit" => self.edit(a),
             "write" => self.write(a),
-            "grep" => grep(a),
-            "glob" => glob_files(a),
+            "grep" => grep(a, &self.root),
+            "glob" => glob_files(a, &self.root),
             "bash" => self.bash(a),
             "def" | "refs" => self.lsp_query(name, a),
             _ => format!("error: unknown tool {name}"),
@@ -174,7 +189,7 @@ impl Tools {
         if !self.lsp.contains_key(&ext) {
             let cmd = self.profile.lsp[&ext].clone();
             let secs = if self.profile.bash_timeout == 0 { 60 } else { self.profile.bash_timeout };
-            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
             match crate::lsp::Lsp::start(&cmd, &root, Duration::from_secs(secs)) {
                 Ok(l) => {
                     self.lsp.insert(ext.clone(), l);
@@ -192,7 +207,7 @@ impl Tools {
 
     fn read(&mut self, a: &Value) -> String {
         let path = arg(a, "path");
-        let text = match fs::read_to_string(path) {
+        let text = match fs::read_to_string(self.path(path)) {
             Ok(t) => t,
             Err(e) => return format!("error: {e}"),
         };
@@ -230,7 +245,7 @@ impl Tools {
         if old.is_empty() {
             return "error: old is empty; use write to create files".into();
         }
-        let text = match fs::read_to_string(path) {
+        let text = match fs::read_to_string(self.path(path)) {
             Ok(t) => t,
             Err(e) => return format!("error: {e}"),
         };
@@ -238,7 +253,7 @@ impl Tools {
         if n == 0 && self.profile.edit_format == EditFormat::Fuzzy {
             match fuzzy_replace(&text, old, new) {
                 Ok((updated, line)) => {
-                    if let Err(e) = fs::write(path, updated) {
+                    if let Err(e) = fs::write(self.path(path), updated) {
                         return format!("error: {e}");
                     }
                     self.invalidate(path);
@@ -263,7 +278,7 @@ impl Tools {
         }
         let line = text[..text.find(old).unwrap()].matches('\n').count() + 1;
         let updated = if all { text.replace(old, new) } else { text.replacen(old, new, 1) };
-        if let Err(e) = fs::write(path, updated) {
+        if let Err(e) = fs::write(self.path(path), updated) {
             return format!("error: {e}");
         }
         self.invalidate(path);
@@ -272,10 +287,11 @@ impl Tools {
 
     fn write(&mut self, a: &Value) -> String {
         let (path, content) = (arg(a, "path"), arg(a, "content"));
-        if let Some(dir) = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()) {
+        let full = self.path(path);
+        if let Some(dir) = full.parent().filter(|d| !d.as_os_str().is_empty()) {
             let _ = fs::create_dir_all(dir);
         }
-        match fs::write(path, content) {
+        match fs::write(&full, content) {
             Ok(_) => {
                 self.invalidate(path);
                 format!("ok: wrote {path} ({} lines)", content.lines().count())
@@ -289,7 +305,7 @@ impl Tools {
         if !self.yolo && !confirm(&format!("run `{cmd}`?")) {
             return "error: user declined this command".into();
         }
-        match shell(cmd, self.profile.bash_timeout) {
+        match shell(cmd, self.profile.bash_timeout, &self.root) {
             Ok((code, text)) => format!("exit {code}\n{}", truncate_middle(&text, BASH_HEAD, BASH_TAIL)),
             Err(e) => format!("error: {e}"),
         }
@@ -300,7 +316,7 @@ impl Tools {
     /// carry output.
     pub fn run_check(&self) -> Option<(bool, String)> {
         let cmd = self.profile.check.as_deref()?;
-        Some(match shell(cmd, self.profile.bash_timeout) {
+        Some(match shell(cmd, self.profile.bash_timeout, &self.root) {
             Ok((0, _)) => (true, format!("[check `{cmd}`: passed]")),
             Ok((code, text)) => (false, format!("[check `{cmd}`: exit {code}]\n{}", truncate_middle(&text, 30, 30))),
             Err(e) => (false, format!("[check `{cmd}` could not run: {e}]")),
@@ -313,16 +329,17 @@ impl Tools {
     }
 }
 
-fn grep(a: &Value) -> String {
+fn grep(a: &Value, root: &Path) -> String {
     let re = match Regex::new(arg(a, "pattern")) {
         Ok(r) => r,
         Err(e) => return format!("error: bad regex: {e}"),
     };
-    let root = a["path"].as_str().unwrap_or(".");
+    let sub = a["path"].as_str().unwrap_or(".");
+    let base = if sub == "." { root.to_path_buf() } else { root.join(sub) };
     let filter = a["glob"].as_str().and_then(|g| glob::Pattern::new(g).ok());
     let (mut out, mut hits, mut files) = (String::new(), 0usize, 0usize);
 
-    for e in walk(root) {
+    for e in walk(&base.to_string_lossy()) {
         let p = e.path();
         if let Some(f) = &filter {
             let name = e.file_name().to_string_lossy();
@@ -340,7 +357,7 @@ fn grep(a: &Value) -> String {
                     counted = true;
                 }
                 if hits <= GREP_MAX {
-                    let _ = writeln!(out, "{}:{}: {}", display(p), i + 1, clip(l.trim(), 200));
+                    let _ = writeln!(out, "{}:{}: {}", display(p, root), i + 1, clip(l.trim(), 200));
                 }
             }
         }
@@ -355,15 +372,16 @@ fn grep(a: &Value) -> String {
     }
 }
 
-fn glob_files(a: &Value) -> String {
-    let paths = match glob::glob(arg(a, "pattern")) {
+fn glob_files(a: &Value, root: &Path) -> String {
+    let pattern = root.join(arg(a, "pattern"));
+    let paths = match glob::glob(&pattern.to_string_lossy()) {
         Ok(p) => p,
         Err(e) => return format!("error: {e}"),
     };
     let mut found: Vec<String> = paths
         .filter_map(Result::ok)
-        .filter(|p| p.is_file() && !p.components().any(|c| is_skipped(&c.as_os_str().to_string_lossy())))
-        .map(|p| display(&p))
+        .filter(|p| p.is_file() && !p.strip_prefix(root).unwrap_or(p).components().any(|c| is_skipped(&c.as_os_str().to_string_lossy())))
+        .map(|p| display(&p, root))
         .collect();
     if found.is_empty() {
         return "no files".into();
@@ -381,9 +399,10 @@ fn glob_files(a: &Value) -> String {
 
 /// Run a shell command. `timeout` in seconds, 0 = no limit. On timeout the
 /// child is killed so a hung command can't wedge an (unattended) agent.
-fn shell(cmd: &str, timeout: u64) -> Result<(i32, String), String> {
+fn shell(cmd: &str, timeout: u64, cwd: &Path) -> Result<(i32, String), String> {
     let mut command = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
     command.args(if cfg!(windows) { ["/C", cmd] } else { ["-c", cmd] });
+    command.current_dir(cwd);
 
     if timeout == 0 {
         let o = command.output().map_err(|e| e.to_string())?;
@@ -465,7 +484,7 @@ fn fuzzy_replace(text: &str, old: &str, new: &str) -> Result<(String, usize), us
     Ok((s, start + 1))
 }
 
-fn walk(root: &str) -> impl Iterator<Item = walkdir::DirEntry> {
+pub(crate) fn walk(root: &str) -> impl Iterator<Item = walkdir::DirEntry> {
     WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| e.depth() == 0 || !is_skipped(&e.file_name().to_string_lossy()))
@@ -473,11 +492,14 @@ fn walk(root: &str) -> impl Iterator<Item = walkdir::DirEntry> {
         .filter(|e| e.file_type().is_file())
 }
 
-fn is_skipped(name: &str) -> bool {
+pub(crate) fn is_skipped(name: &str) -> bool {
     (name.starts_with('.') && name.len() > 1 && name != "..") || SKIP_DIRS.contains(&name)
 }
 
-fn display(p: &Path) -> String {
+/// Format a path for the model: relative to the working root, forward slashes.
+/// Paths are shown as the model would supply them, never the sandbox prefix.
+fn display(p: &Path, root: &Path) -> String {
+    let p = p.strip_prefix(root).unwrap_or(p);
     let s = p.to_string_lossy();
     s.strip_prefix("./").unwrap_or(&s).replace('\\', "/")
 }
@@ -519,7 +541,7 @@ fn normalize(s: &str) -> String {
     s.lines().map(str::trim).collect::<Vec<_>>().join("\n")
 }
 
-fn hash(s: &str) -> u64 {
+pub(crate) fn hash(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
@@ -621,11 +643,39 @@ mod tests {
     #[cfg(unix)]
     fn bash_times_out_and_is_killed() {
         let start = std::time::Instant::now();
-        let r = shell("sleep 10", 1);
+        let r = shell("sleep 10", 1, Path::new("."));
         assert!(r.is_err() && r.unwrap_err().contains("timed out"), "should time out");
         assert!(start.elapsed() < Duration::from_secs(5), "should return promptly after kill");
         // 0 = no limit still works for quick commands.
-        assert_eq!(shell("exit 3", 0).unwrap().0, 3);
+        assert_eq!(shell("exit 3", 0, Path::new(".")).unwrap().0, 3);
+    }
+
+    #[test]
+    fn rooted_tools_redirect_to_the_root_with_relative_display() {
+        // A sandbox dir the model knows nothing about.
+        let root = std::env::temp_dir().join(format!("tern_root_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.rs"), "fn needle() {}\n").unwrap();
+
+        let mut t = Tools::new(true, &Profile::default()).in_dir(root.clone());
+
+        // write/read resolve under the root, not the process CWD.
+        assert!(t.run("write", &json!({"path": "src/b.rs", "content": "let x = 1;\n"})).starts_with("ok"));
+        assert_eq!(fs::read_to_string(root.join("src/b.rs")).unwrap(), "let x = 1;\n");
+        assert!(t.run("read", &json!({"path": "src/a.rs"})).contains("needle"));
+
+        // grep/glob search the root but report paths as the model gave them.
+        let g = t.run("grep", &json!({"pattern": "needle"}));
+        assert!(g.contains("src/a.rs:1:") && !g.contains("tern_root"), "{g}");
+        let gl = t.run("glob", &json!({"pattern": "src/*.rs"}));
+        assert!(gl.contains("src/a.rs") && gl.contains("src/b.rs") && !gl.contains("tern_root"), "{gl}");
+
+        // bash runs with the root as its working directory.
+        #[cfg(unix)]
+        assert!(t.run("bash", &json!({"command": "cat src/a.rs"})).contains("needle"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
