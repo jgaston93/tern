@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-tern is a minimal agentic coding CLI in Rust (~1,300 lines across `src/`). Its organizing goal is to **spend as few tokens as possible per task** and to **make open-weight models reliable**. It talks to any OpenAI-compatible `/chat/completions` endpoint (llama.cpp server, Ollama, vLLM, LM Studio, OpenRouter, OpenAI). Every design decision trades against the token budget — keep that lens when changing anything.
+tern is a minimal agentic coding CLI in Rust (~2,000 lines across `src/`, incl. inline tests). Its organizing goal is to **spend as few tokens as possible per task** and to **make open-weight models reliable**. It talks to any OpenAI-compatible `/chat/completions` endpoint (llama.cpp server, Ollama, vLLM, LM Studio, OpenRouter, OpenAI). Every design decision trades against the token budget — keep that lens when changing anything.
 
 ## Commands
 
@@ -42,7 +42,9 @@ The agent is a straight loop; the cleverness is all in what gets sent and what g
 
 - **`parse.rs`** — leniency for open-weight models (gated by `lenient_parsing`). Recovers tool calls written as plain text (Qwen3-Coder `<function=…>` XML, Hermes `<tool_call>{…}`, fenced JSON naming a known tool) and repairs sloppy JSON (trailing commas, code fences, double-encoding). Every recovery here saves a full round-trip, which would resend the entire context. Fenced-JSON recovery only fires for **known tool names** so example JSON in a reply isn't mistaken for a call.
 
-- **`tools.rs`** — the six tools (`read`, `edit`, `write`, `grep`, `glob`, `bash`), each written to return the **fewest tokens that still let the model decide its next move**. `edit` returns a status line, never the file; on a failed exact match it hints that it would match ignoring indentation. Fuzzy edit (`fuzzy_replace`) matches line-by-line ignoring indentation/CRLF, re-indents the replacement, and refuses if it would match more than once. `whole` edit format removes the edit tool entirely (small models rewrite whole files more reliably). `read` pages at 200 lines, clips long lines, and returns `[unchanged]` for a re-read of the same range (the `seen` hash map, cleared by `forget_reads` whenever context is trimmed so the stub can't lie). `grep`/`glob` cap results and report how many were omitted. `bash` truncates the middle (keeps first error + final summary), strips ANSI.
+- **`lsp.rs`** — a minimal JSON-RPC-over-stdio LSP client (no extra crates) backing the optional `def`/`refs` tools. Started lazily per file extension from the profile's `lsp` map, kept for the session (killed on drop). `def`/`refs` resolve a symbol via `workspace/symbol` (+ `textDocument/references`) and return grep-style `path:line: source`; any failure degrades to a "use grep" hint so the agent never stalls. Offered only when `lsp` is configured, so the cacheable prefix is unchanged otherwise.
+
+- **`tools.rs`** — the six core tools (`read`, `edit`, `write`, `grep`, `glob`, `bash`), each written to return the **fewest tokens that still let the model decide its next move**. `edit` returns a status line, never the file; on a failed exact match it hints that it would match ignoring indentation. Fuzzy edit (`fuzzy_replace`) matches line-by-line ignoring indentation/CRLF, re-indents the replacement, and refuses if it would match more than once. `whole` edit format removes the edit tool entirely (small models rewrite whole files more reliably). `read` pages at 200 lines, clips long lines, and returns `[unchanged]` for a re-read of the same range (the `seen` hash map, cleared by `forget_reads` whenever context is trimmed so the stub can't lie). `grep`/`glob` cap results and report how many were omitted. `bash` truncates the middle (keeps first error + final summary), strips ANSI.
 
 ## Conventions when editing
 

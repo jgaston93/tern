@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use wait_timeout::ChildExt;
@@ -82,6 +82,26 @@ You get back only its final summary, not its intermediate work, so give complete
             }, "required": ["description", "role"]}
         }}));
     }
+    // `def`/`refs` are offered only when a language server is configured.
+    if !p.lsp.is_empty() {
+        let multi = p.lsp.len() > 1;
+        let lang_prop = if multi {
+            json!({"type": "string", "description": "file extension picking the server, e.g. rs"})
+        } else {
+            json!({"type": "string", "description": "optional; one server is configured"})
+        };
+        let lang_desc = if multi { " Pass lang to pick the server." } else { "" };
+        out.push(json!({"type": "function", "function": {
+            "name": "def",
+            "description": format!("Find where a symbol is defined (via the language server). Returns path:line: source.{lang_desc}"),
+            "parameters": {"type": "object", "properties": {"symbol": s, "lang": lang_prop}, "required": ["symbol"]}
+        }}));
+        out.push(json!({"type": "function", "function": {
+            "name": "refs",
+            "description": format!("Find all references to a symbol (via the language server). Returns path:line: source.{lang_desc}"),
+            "parameters": {"type": "object", "properties": {"symbol": s, "lang": lang_prop}, "required": ["symbol"]}
+        }}));
+    }
     Value::Array(out)
 }
 
@@ -91,11 +111,14 @@ pub struct Tools {
     /// Hash of what each read range last returned. Lets a repeat read return a
     /// one-line stub instead of the same 200 lines again.
     seen: HashMap<String, u64>,
+    /// Language servers, started lazily per extension and kept for the session
+    /// (each kills its child on drop).
+    lsp: HashMap<String, crate::lsp::Lsp>,
 }
 
 impl Tools {
     pub fn new(yolo: bool, profile: &Profile) -> Self {
-        Tools { yolo, profile: profile.clone(), seen: HashMap::new() }
+        Tools { yolo, profile: profile.clone(), seen: HashMap::new(), lsp: HashMap::new() }
     }
 
     /// Called when old results are dropped from context: the model no longer
@@ -119,7 +142,51 @@ impl Tools {
             "grep" => grep(a),
             "glob" => glob_files(a),
             "bash" => self.bash(a),
+            "def" | "refs" => self.lsp_query(name, a),
             _ => format!("error: unknown tool {name}"),
+        }
+    }
+
+    /// `def`/`refs` via a language server. Any failure degrades to a hint to use
+    /// grep rather than stalling the agent.
+    fn lsp_query(&mut self, kind: &str, a: &Value) -> String {
+        if self.profile.lsp.is_empty() {
+            return "error: no language server configured; use grep".into();
+        }
+        let symbol = arg(a, "symbol");
+        if symbol.is_empty() {
+            return "error: symbol is required".into();
+        }
+        // Pick the server: by `lang`, else the sole configured one, else ask.
+        let ext = match a["lang"].as_str() {
+            Some(l) if self.profile.lsp.contains_key(l) => l.to_string(),
+            Some(l) => return format!("error: no language server configured for '{l}'"),
+            None if self.profile.lsp.len() == 1 => self.profile.lsp.keys().next().unwrap().clone(),
+            None => {
+                let mut langs: Vec<&String> = self.profile.lsp.keys().collect();
+                langs.sort();
+                return format!(
+                    "error: multiple language servers configured ({}); pass lang",
+                    langs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                );
+            }
+        };
+        if !self.lsp.contains_key(&ext) {
+            let cmd = self.profile.lsp[&ext].clone();
+            let secs = if self.profile.bash_timeout == 0 { 60 } else { self.profile.bash_timeout };
+            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            match crate::lsp::Lsp::start(&cmd, &root, Duration::from_secs(secs)) {
+                Ok(l) => {
+                    self.lsp.insert(ext.clone(), l);
+                }
+                Err(e) => return format!("error: lsp unavailable ({e}); use grep"),
+            }
+        }
+        let server = self.lsp.get_mut(&ext).unwrap();
+        let r = if kind == "def" { server.def(symbol, GREP_MAX) } else { server.refs(symbol, GREP_MAX) };
+        match r {
+            Ok(s) => s,
+            Err(e) => format!("error: lsp {kind} failed ({e}); use grep"),
         }
     }
 
@@ -466,7 +533,7 @@ fn confirm(q: &str) -> bool {
 }
 
 pub fn summarize_args(a: &Value) -> String {
-    let s = ["pattern", "command", "path", "description"]
+    let s = ["pattern", "command", "path", "description", "symbol"]
         .iter()
         .find_map(|k| a[*k].as_str())
         .map(str::to_string)
@@ -569,6 +636,32 @@ mod tests {
         let t = schemas(&orch);
         let task = t.as_array().unwrap().iter().find(|t| t["function"]["name"] == "task").unwrap().clone();
         assert_eq!(task["function"]["parameters"]["properties"]["role"]["enum"][0], "small");
+    }
+
+    #[test]
+    fn lsp_tools_only_offered_when_configured() {
+        let plain = schemas(&Profile::default());
+        let names: Vec<&str> =
+            plain.as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
+        assert!(!names.contains(&"def") && !names.contains(&"refs"));
+
+        let mut lsp = std::collections::HashMap::new();
+        lsp.insert("rs".to_string(), "rust-analyzer".to_string());
+        let p = Profile { lsp, ..Profile::default() };
+        let sch = schemas(&p);
+        let names: Vec<&str> =
+            sch.as_array().unwrap().iter().filter_map(|t| t["function"]["name"].as_str()).collect();
+        assert!(names.contains(&"def") && names.contains(&"refs"));
+        // No server running, so a query degrades to a grep hint, never panics.
+        let r = Tools::new(true, &p).run("def", &json!({"symbol": "nope", "lang": "py"}));
+        assert!(r.contains("no language server configured for 'py'"), "{r}");
+
+        // A server command that can't be spawned degrades to a grep hint too.
+        let mut bad = std::collections::HashMap::new();
+        bad.insert("rs".to_string(), "tern-no-such-lsp-binary".to_string());
+        let p = Profile { lsp: bad, bash_timeout: 2, ..Profile::default() };
+        let r = Tools::new(true, &p).run("def", &json!({"symbol": "x"}));
+        assert!(r.contains("lsp unavailable") && r.contains("use grep"), "{r}");
     }
 
     #[test]
