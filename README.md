@@ -89,3 +89,4 @@ Every request resends the whole history, so a token added early is paid for on e
 2. **Save full shell output to a file** when truncating, and tell the model the path.
 3. **Git-worktree isolation** for parallel subagents, so overlapping edits can't clobber each other.
 4. **Plan/build profiles** — a read-only `plan` profile (no edit/write/bash) that produces an implementation plan, and a `build` profile that carries it out, so an orchestrator can plan first and delegate the build. Keeps planning cheap and building focused.
+5. **Cap parallel subagent fan-out** — a `max_parallel` clamp so a step emitting many `task` calls spawns threads/connections in bounded batches rather than all at once.
