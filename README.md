@@ -44,6 +44,7 @@ What each knob does:
 - **lenient_parsing** (on by default). Recovers tool calls written as text: Qwen3-Coder's `<function=...>` XML, Hermes `<tool_call>{...}</tool_call>`, and fenced JSON naming a real tool. Repairs trailing commas, code fences, and double-encoded arguments. Each recovery saves a full round-trip.
 - **check.** Runs after any step that changed files. A pass costs the model one line (`[check: passed]`); a failure includes the truncated output, so compiler errors arrive without the model having to ask.
 - **keep_reasoning.** Keeps reasoning text across tool calls within a request (gpt-oss expects this), then drops it at the next user message.
+- **Structured output** (`tool_choice`, `grammar`, `response_format`). Passed through to the server to constrain tool calls at the sampler, so fewer come back as text. `grammar` is llama.cpp GBNF; `response_format` is the vLLM guided / OpenAI object; `tool_choice` stays `"auto"` (`"required"` forces a call every turn and breaks the text-only finish). With a server that reliably emits well-formed calls you can then set `lenient_parsing = false`.
 - **Sampling** fields are sent only when set, because hosted APIs reject some of them. `repeat_penalty` is sent under both the llama.cpp and vLLM names.
 
 Server-side settings matter as much: run llama.cpp with `--jinja` so it uses the model's own chat template, and set Ollama's `num_ctx` explicitly (its default is small and it silently truncates).

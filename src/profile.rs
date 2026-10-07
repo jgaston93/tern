@@ -54,6 +54,14 @@ pub struct Profile {
     /// Profile names this agent may spawn via the `task` tool.
     /// Empty = no `task` tool, i.e. an ordinary single agent.
     pub subagents: Vec<String>,
+    /// Constrain tool-call output at the server. Sent verbatim only when set;
+    /// unsupported servers ignore what they don't know. `tool_choice`
+    /// "required" forces a call every turn (breaks the text-only finish), so
+    /// prefer "auto". `grammar` is llama.cpp GBNF; `response_format` is the
+    /// vLLM guided / OpenAI structured-output object.
+    pub tool_choice: Option<String>,
+    pub grammar: Option<String>,
+    pub response_format: Option<toml::Value>,
 }
 
 impl Default for Profile {
@@ -78,6 +86,9 @@ impl Default for Profile {
             bash_timeout: 120,
             require_check_pass: false,
             subagents: vec![],
+            tool_choice: None,
+            grammar: None,
+            response_format: None,
         }
     }
 }
@@ -161,6 +172,17 @@ mod tests {
         assert!(!p.require_check_pass && p.subagents.is_empty());
         let o = select("x", Some("orchestrator")).unwrap();
         assert_eq!(o.subagents, vec!["small".to_string()]);
+        assert!(p.tool_choice.is_none() && p.grammar.is_none() && p.response_format.is_none());
+    }
+
+    #[test]
+    fn parses_structured_output_knobs() {
+        let src = "[[profile]]\nname='g'\ntool_choice='auto'\ngrammar='root ::= \"x\"'\n\
+                   [profile.response_format]\ntype='json_object'";
+        let p = &parse(src, "t").unwrap()[0];
+        assert_eq!(p.tool_choice.as_deref(), Some("auto"));
+        assert_eq!(p.grammar.as_deref(), Some("root ::= \"x\""));
+        assert_eq!(p.response_format.as_ref().unwrap()["type"].as_str(), Some("json_object"));
     }
 
     #[test]

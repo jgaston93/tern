@@ -29,6 +29,14 @@
 #   subagents       profile names this agent may delegate to via the `task` tool
 #                   (empty = ordinary single agent; the child's intermediate tokens
 #                   never enter this agent's context, only its final summary does)
+#   tool_choice     constrain tool calling at the server; sent verbatim when set.
+#                   "auto" is safe; "required" forces a call every turn and breaks
+#                   the text-only finish, so avoid it.
+#   grammar         llama.cpp GBNF string, sent verbatim (forces valid output)
+#   response_format structured-output object (vLLM guided / OpenAI), e.g.
+#                   [profile.response_format] \n type = "json_object"
+#                   Constraining output means fewer tool calls arrive as text, so
+#                   with a reliable server you can set lenient_parsing = false.
 
 [[profile]]
 name = "default"
