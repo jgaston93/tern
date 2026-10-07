@@ -49,6 +49,7 @@ What each knob does:
 - **lsp.** Enables `def`/`refs` tools backed by a language server (`lsp = { rs = "rust-analyzer" }`, keyed by file extension). They resolve a symbol to `path:line: source` through the server — precise where grep is ambiguous (overloads, same-named methods) and fewer tokens than reading around. A missing or failed server degrades to a grep hint. Offered only when configured.
 - **subagents.** Names the profiles this agent may delegate to via the `task` tool; empty means an ordinary single agent. Only the subagent's final summary re-enters this agent's context, not its reads/edits — so delegation stays cheap. The built-in `orchestrator` is wired to `["plan", "build"]`: it tasks the read-only `plan` profile for an implementation plan, then hands that plan to `build` to carry out.
 - **parallel_subagents.** Runs multiple `task` delegations from one step concurrently, each in its own context. Only speeds things up on a backend that decodes requests in parallel (vLLM, `llama.cpp --parallel`); a single llama.cpp slot serializes them. Subagents share the working tree, so give them non-overlapping work.
+- **max_parallel.** Caps how many parallel subagents run at once: a step emitting more `task` calls than this runs them in batches of that size instead of opening every thread/connection at once. `0` (default) means no clamp. Only applies when `parallel_subagents` is set.
 - **Sampling** fields are sent only when set, because hosted APIs reject some of them. `repeat_penalty` is sent under both the llama.cpp and vLLM names.
 
 Server-side settings matter as much: run llama.cpp with `--jinja` so it uses the model's own chat template, and set Ollama's `num_ctx` explicitly (its default is small and it silently truncates).
@@ -90,5 +91,4 @@ Every request resends the whole history, so a token added early is paid for on e
 1. **Streaming** so long responses don't look frozen.
 2. **Save full shell output to a file** when truncating, and tell the model the path.
 3. **Git-worktree isolation** for parallel subagents, so overlapping edits can't clobber each other.
-4. **Cap parallel subagent fan-out** — a `max_parallel` clamp so a step emitting many `task` calls spawns threads/connections in bounded batches rather than all at once.
-5. **Interactive mode cycling** — `/plan` `/build` `/mode` commands (and eventually a TUI shift+tab) to switch profiles mid-session with shared context, the way Claude Code / OpenCode do.
+4. **Interactive mode cycling** — `/plan` `/build` `/mode` commands (and eventually a TUI shift+tab) to switch profiles mid-session with shared context, the way Claude Code / OpenCode do.

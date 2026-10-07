@@ -70,6 +70,10 @@ pub struct Profile {
     /// up on a backend that decodes requests in parallel (vLLM, llama.cpp
     /// --parallel); give subagents non-overlapping work (shared working tree).
     pub parallel_subagents: bool,
+    /// Cap on how many parallel subagents run at once: a step emitting many
+    /// `task` calls spawns them in batches of this size rather than all at once.
+    /// 0 = no clamp. Ignored unless `parallel_subagents` is set.
+    pub max_parallel: usize,
 }
 
 impl Default for Profile {
@@ -99,6 +103,7 @@ impl Default for Profile {
             response_format: None,
             lsp: HashMap::new(),
             parallel_subagents: false,
+            max_parallel: 0,
         }
     }
 }
@@ -199,6 +204,13 @@ mod tests {
         assert_eq!(p.tool_choice.as_deref(), Some("auto"));
         assert_eq!(p.grammar.as_deref(), Some("root ::= \"x\""));
         assert_eq!(p.response_format.as_ref().unwrap()["type"].as_str(), Some("json_object"));
+    }
+
+    #[test]
+    fn max_parallel_defaults_off_and_parses() {
+        assert_eq!(Profile::default().max_parallel, 0);
+        let p = &parse("[[profile]]\nname='p'\nparallel_subagents=true\nmax_parallel=3", "t").unwrap()[0];
+        assert_eq!(p.max_parallel, 3);
     }
 
     #[test]
