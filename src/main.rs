@@ -151,6 +151,11 @@ fn main() {
 /// so this is a backstop against a misconfigured recursive delegation.
 const MAX_SUBAGENT_DEPTH: usize = 2;
 
+/// How many times `require_check_pass` will force the model to keep working
+/// past a "done" with a failing check. A check that can't be made to pass
+/// must not burn the whole step budget resending the context every retry.
+const MAX_CHECK_RETRIES: usize = 3;
+
 /// Runs the agent loop to completion. `depth` is 0 for the top-level agent and
 /// increments for each nested subagent; it controls log indentation and
 /// whether assistant text prints to stdout (only the top level does). Returns
@@ -174,6 +179,11 @@ fn run_turn(
         v
     };
     let mut last_text = String::new();
+    // Tracked across the whole turn for `require_check_pass`: whether the agent
+    // actually changed anything (a red check it never touched isn't its to fix),
+    // and how many times we've already forced it past a failing check.
+    let mut made_edits = false;
+    let mut check_retries = 0usize;
 
     for step in 1..=cfg.max_steps {
         ctx.maintain(cfg, tools);
@@ -207,10 +217,14 @@ fn run_turn(
         let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
         ctx.push(msg);
         if calls.is_empty() {
-            // Don't let the model declare victory while the check is failing.
-            if cfg.profile.require_check_pass {
+            // Don't let the model declare victory while the check is failing —
+            // but only if it actually changed something this turn, and only up
+            // to MAX_CHECK_RETRIES so an unfixable check can't loop to the step
+            // limit resending the whole context each time.
+            if cfg.profile.require_check_pass && made_edits && check_retries < MAX_CHECK_RETRIES {
                 if let Some((false, report)) = tools.run_check() {
-                    eprintln!("{ind}  [not done — check still failing, continuing]");
+                    check_retries += 1;
+                    eprintln!("{ind}  [not done — check still failing, continuing ({check_retries}/{MAX_CHECK_RETRIES})]");
                     ctx.push(json!({"role": "user", "content":
                         format!("Not finished: the check is still failing. Keep working; do not stop until it passes.\n{report}")}));
                     continue;
@@ -246,6 +260,8 @@ fn run_turn(
             changed |= (matches!(name, "edit" | "write") && out.starts_with("ok")) || name == "task";
             ctx.push_tool_result(id, label, out);
         }
+
+        made_edits |= changed;
 
         // One check per step, after all of the step's edits, attached to the
         // last result so the model sees it before deciding what's next.
