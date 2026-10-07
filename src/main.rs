@@ -310,20 +310,25 @@ fn run_turn(
         if cfg.profile.parallel_subagents && subagent_calls >= 2 {
             // Independent subagents run concurrently (scope lets the threads
             // borrow cfg/args without 'static); each builds its own `tools`, so
-            // there's no shared mutable state between them.
-            std::thread::scope(|scope| {
-                let mut handles = Vec::new();
-                for (i, c) in parsed.iter().enumerate() {
-                    if c.is_subagent() {
+            // there's no shared mutable state between them. They run in batches
+            // of `max_parallel` so a step with many `task` calls doesn't open
+            // all the threads/connections at once; 0 means no clamp.
+            let idx: Vec<usize> = parsed.iter().enumerate().filter(|(_, c)| c.is_subagent()).map(|(i, _)| i).collect();
+            let batch = if cfg.profile.max_parallel == 0 { idx.len() } else { cfg.profile.max_parallel };
+            for chunk in idx.chunks(batch) {
+                std::thread::scope(|scope| {
+                    let mut handles = Vec::new();
+                    for &i in chunk {
+                        let c = &parsed[i];
                         eprintln!("{ind}  · {}", c.label);
                         let args = c.args.as_ref().unwrap();
                         handles.push((i, scope.spawn(move || run_subagent(cfg, args, depth))));
                     }
-                }
-                for (i, h) in handles {
-                    outs[i] = Some(h.join().unwrap_or_else(|_| "error: subagent thread panicked".into()));
-                }
-            });
+                    for (i, h) in handles {
+                        outs[i] = Some(h.join().unwrap_or_else(|_| "error: subagent thread panicked".into()));
+                    }
+                });
+            }
             // Non-subagent calls run after the subagents have joined, not
             // alongside them: the parent's own edits/bash would otherwise race
             // a subagent mutating the shared working tree.

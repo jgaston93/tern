@@ -44,6 +44,8 @@
 #   parallel_subagents  run several task delegations from one step at once. Only
 #                   helps on a backend that decodes in parallel (vLLM, llama.cpp
 #                   --parallel); give subagents non-overlapping work (shared tree).
+#   max_parallel    cap on concurrent subagents: a step with more task calls runs
+#                   them in batches of this size (0 = no clamp). Needs parallel_subagents.
 
 [[profile]]
 name = "default"
