@@ -181,8 +181,14 @@ mod tests {
         assert_eq!(p.bash_timeout, 120);
         assert!(!p.require_check_pass && p.subagents.is_empty());
         let o = select("x", Some("orchestrator")).unwrap();
-        assert_eq!(o.subagents, vec!["small".to_string()]);
+        assert_eq!(o.subagents, vec!["plan".to_string(), "build".to_string()]);
         assert!(p.tool_choice.is_none() && p.grammar.is_none() && p.response_format.is_none());
+        // plan is read-only; build is a full-access executor that must pass its check.
+        let plan = select("x", Some("plan")).unwrap();
+        assert!(plan.tool_enabled("read") && plan.tool_enabled("grep") && plan.tool_enabled("glob"));
+        assert!(!plan.tool_enabled("edit") && !plan.tool_enabled("write") && !plan.tool_enabled("bash"));
+        let build = select("x", Some("build")).unwrap();
+        assert!(build.require_check_pass && build.tool_enabled("edit") && build.tool_enabled("bash"));
     }
 
     #[test]

@@ -58,15 +58,32 @@ ctx = 128000
 edit_format = "exact"
 lenient_parsing = false
 
-# Orchestrator: plans and delegates self-contained subtasks to `small` subagents,
-# paying only for each subtask's final summary rather than its reads/edits/output.
-# Select with --profile orchestrator. Point it at your strongest available model.
+# Orchestrator: delegates to a read-only `plan` subagent, then hands that plan to
+# a `build` subagent to carry out — paying only for each subagent's final summary,
+# not its reads/edits/output. Select with --profile orchestrator. Point it at your
+# strongest available model.
 [[profile]]
 name = "orchestrator"
 ctx = 128000
 edit_format = "exact"
-subagents = ["small"]
+subagents = ["plan", "build"]
 require_check_pass = true
+prompt_extra = "Work by delegating. First task the plan subagent to produce an implementation plan, then task the build subagent with that plan to carry it out. Keep your own context minimal."
+
+# Read-only planner: no edit/write/bash, so it can only investigate and return a
+# plan. Useful standalone (--profile plan) or as the orchestrator's plan role.
+[[profile]]
+name = "plan"
+tools = ["read", "grep", "glob"]
+
+# Executor: carries out a plan with full tools and won't finish on a failing check.
+# Paired with `plan` under the orchestrator.
+[[profile]]
+name = "build"
+ctx = 65536
+edit_format = "exact"
+require_check_pass = true
+prompt_extra = "You are given an implementation plan. Carry it out exactly, then verify."
 
 [[profile]]
 name = "qwen3-coder"
