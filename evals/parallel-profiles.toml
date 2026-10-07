@@ -1,0 +1,32 @@
+# Profiles for the parallel-subagent eval (point TERN_CONFIG at this file).
+# `par` and `seq` are identical except for parallel_subagents, so a side-by-side
+# run isolates what the sandbox/parallel path actually buys. Both are forced to
+# delegate: no edit/write/bash tools, so every file change goes through `build`.
+
+[[profile]]
+name = "par"
+ctx = 8192
+temperature = 0.2
+tools = ["read", "grep", "glob"]
+subagents = ["build"]
+parallel_subagents = true
+max_parallel = 2
+prompt_extra = "Delegate every file change. In a SINGLE step, emit one `task` call per target file to the `build` role, with non-overlapping files, so they run in parallel. Never edit files yourself."
+
+[[profile]]
+name = "seq"
+ctx = 8192
+temperature = 0.2
+tools = ["read", "grep", "glob"]
+subagents = ["build"]
+parallel_subagents = false
+prompt_extra = "Delegate every file change: emit one `task` call per target file to the `build` role. Never edit files yourself."
+
+# The worker both orchestrators delegate to. Fuzzy edits are safer for an
+# open-weight model; it carries out one file's change and stops.
+[[profile]]
+name = "build"
+ctx = 8192
+temperature = 0.2
+edit_format = "fuzzy"
+prompt_extra = "Carry out the change described for the single file you were given, then stop. Do not touch other files."

@@ -1,0 +1,1 @@
+Implement both func_a and func_b in mod.py per their docstrings. Split the work: in a SINGLE step, emit TWO task calls to the build role to run in parallel — one subagent implements func_a, the other implements func_b. Both work on mod.py.

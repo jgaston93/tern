@@ -1,0 +1,5 @@
+Implement the three stubbed functions in this project. Each lives in its own file and its docstring specifies the exact behavior:
+- pkg/strings.py  (shout)
+- pkg/numbers.py  (double)
+- pkg/lists.py    (tail)
+They are independent — each can be implemented without touching the others.
